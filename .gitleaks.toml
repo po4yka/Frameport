@@ -1,0 +1,18 @@
+[allowlist]
+description = "Allow paths and strings that are known false positives"
+
+paths = [
+    # Vendored Rust crates may contain binary-looking hex strings
+    "rust/fuji-rs/vendor/.*",
+    # GeoIP binary databases (if present)
+    ".*GeoIP.*\\.mmdb",
+    # Test golden fixtures
+    ".*\\.golden",
+    # Test fixture directories
+    ".*fixtures.*",
+]
+
+regexes = [
+    # AWS documentation example key used in tests
+    "AKIAIOSFODNN7EXAMPLE",
+]

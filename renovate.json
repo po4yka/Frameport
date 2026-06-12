@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "pinDigests": true,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group AndroidX updates together",
+      "matchPackagePrefixes": ["androidx."],
+      "groupName": "AndroidX"
+    },
+    {
+      "description": "Group Kotlin and Compose Compiler updates together",
+      "matchPackagePrefixes": ["org.jetbrains.kotlin"],
+      "groupName": "Kotlin"
+    },
+    {
+      "description": "Group static analysis tools",
+      "matchPackageNames": [
+        "io.gitlab.arturbosch.detekt",
+        "io.nlopez.compose.rules:detekt",
+        "org.jlleitschuh.gradle.ktlint"
+      ],
+      "groupName": "static-analysis"
+    },
+    {
+      "description": "Batch GitHub Actions digest updates into one weekly PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions-digests",
+      "schedule": ["before 9am on Monday"],
+      "automerge": false
+    },
+    {
+      "description": "Batch Rust workspace dep updates weekly; each PR must regenerate Cargo.lock and pass cargo deny",
+      "matchManagers": ["cargo"],
+      "groupName": "rust-deps",
+      "schedule": ["before 9am on Monday"]
+    }
+  ],
+  "git-submodules": {
+    "enabled": true
+  }
+}

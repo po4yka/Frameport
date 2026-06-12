@@ -13,3 +13,8 @@ app/build/
 *.aab
 rust/fuji-rs/target/
 native/fuji-rust-android/src/main/jniLibs/
+.claude/settings.local.json
+.claude/logs/
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+.claude/agent-memory/
