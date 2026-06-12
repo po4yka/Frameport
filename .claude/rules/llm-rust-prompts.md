@@ -51,7 +51,7 @@ Skim AI-generated Rust diffs first for these patterns. Each one is a 70%+ predic
 
 **Android/JNI-specific (Frameport fuji-ffi crate):**
 
-- `Box::leak`, `mem::transmute`, or raw pointer cast applied to a `JNIEnv` / `EnvUnowned` / `AttachGuard` value → LLM "fix" for a lifetime error; reject.
+- `Box::leak`, `mem::transmute`, or raw pointer cast applied to a `JNIEnv` / `AttachGuard` value → LLM "fix" for a lifetime error; reject.
 - `&mut JNIEnv` captured in a `tokio::spawn(async move { ... })` closure → compile error at best, UB through unsafe escape at worst.
 - `tracing::event!` / `tracing::span!` / `log::info!` on a per-packet / per-frame code path → measurable CPU overhead at high transfer/liveview throughput.
 - Logging containing raw device MAC addresses, BLE device names, or file system paths that include user-identifiable data → privacy violation (see `privacy-local-first.md`).

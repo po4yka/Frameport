@@ -206,4 +206,4 @@ When bumping NDK in a future PR:
 
 - `cargo-workflows` — workspace structure, Cargo.lock discipline, edition migration.
 - `rust-performance` — flamegraphs, cargo-bloat, monomorphization audit.
-- `rust-android-jni` — JNI export naming, `EnvUnowned::with_env` pattern.
+- `rust-android-jni` — JNI export naming, `catch_unwind` panic-containment pattern.

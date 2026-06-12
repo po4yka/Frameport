@@ -24,20 +24,31 @@ Already covered in `rust-unsafe` and enforced by `jni-bridge-verifier`. Reproduc
 
 ```rust
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_FujiBindings_jniDoWork(
-    mut env: EnvUnowned<'_>,
-    _thiz: JObject,
-    config: JString,
+pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_FujiBindings_jniDoWork<'local>(
+    mut env: JNIEnv<'local>,
+    _thiz: JClass<'local>,
+    config: JString<'local>,
 ) -> jlong {
-    env.with_env(|env| -> jni::errors::Result<jlong> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> jni::errors::Result<jlong> {
         // body
-    })
-    .into_outcome()
-    .ok_or_throw(env, 0)
+        Ok(0)
+    }));
+    match result {
+        Ok(Ok(val)) => val,
+        Ok(Err(jni::errors::Error::JavaException)) => 0, // exception already pending
+        Ok(Err(e)) => {
+            let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
+            0
+        }
+        Err(_panic) => {
+            let _ = env.throw_new("java/lang/RuntimeException", "native panic in jniDoWork");
+            0
+        }
+    }
 }
 ```
 
-`with_env` plus `into_outcome` is the project's standard wrapper; raw `catch_unwind` is acceptable only in `JNI_OnLoad` / `JNI_OnUnload` where `EnvUnowned` is unavailable.
+Wrap every JNI body in `std::panic::catch_unwind(std::panic::AssertUnwindSafe(...))`. On panic or JNI error, call `env.throw_new(class, msg)` and return the sentinel (0 / null). Never return without handling both the `Err` and panic arms — unwinding across `extern "system"` is UB.
 
 ### Rule 2 — `AttachCurrentThread` paired with `DetachCurrentThread`
 
@@ -199,7 +210,7 @@ For non-tokio threads, set the name via `pthread_setname_np` (Linux/Android) or 
 
 ## Audit checklist when reviewing a JNI diff
 
-1. Every new `Java_*` export uses `EnvUnowned::with_env` + `into_outcome` OR raw `catch_unwind`.
+1. Every new `Java_*` export wraps its body in `std::panic::catch_unwind(std::panic::AssertUnwindSafe(...))` and handles both the `Err` (JNI error) and panic arms before returning the sentinel.
 2. Every callback from a tokio task captures `Arc<JavaVM>` + `GlobalRef`, never raw `JNIEnv`.
 3. Every loop that calls `env.find_class` / `env.new_string` / `env.call_method` is wrapped in `with_local_frame(32, ...)`.
 4. No `Box::leak`, `mem::transmute`, or other escape patterns near `JNIEnv` types.
@@ -208,7 +219,7 @@ For non-tokio threads, set the name via `pthread_setname_np` (Linux/Android) or 
 
 ## Related skills
 
-- `rust-unsafe` — `catch_unwind`, `JString::from_raw`, `EnvUnowned::with_env`, JNI signal handling.
+- `rust-unsafe` — `catch_unwind`, `JString::from_raw`, JNI export signatures, JNI signal handling.
 - `rust-async-internals` — JNI-to-async bridge canonical pattern, `block_on` from JNI rules.
 - `rust-discipline` — panic policy, RAII, allocation hot-path rules apply.
 - `rust-android-build` — `.so` size, ELF symbol allowlist, 16 KiB alignment.

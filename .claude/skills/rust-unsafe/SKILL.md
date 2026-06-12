@@ -1,6 +1,6 @@
 ---
 name: rust-unsafe
-description: Use when adding or reviewing any unsafe Rust block, FFI/JNI export, raw-pointer arithmetic, transmute, ManuallyDrop, mem::zeroed, ioctl call, union access, manual unsafe impl Send/Sync, Box::leak, JString::from_raw, EnvUnowned::from_raw, or any change that removes #![forbid(unsafe_code)] from a previously-safe crate. Triggers on "unsafe", "FFI", "extern", "raw pointer", "transmute", "*mut/*const", "SAFETY comment", "undefined behavior", or any soundness question.
+description: Use when adding or reviewing any unsafe Rust block, FFI/JNI export, raw-pointer arithmetic, transmute, ManuallyDrop, mem::zeroed, ioctl call, union access, manual unsafe impl Send/Sync, Box::leak, JString::from_raw, JavaVM::from_raw, or any change that removes #![forbid(unsafe_code)] from a previously-safe crate. Triggers on "unsafe", "FFI", "extern", "raw pointer", "transmute", "*mut/*const", "SAFETY comment", "undefined behavior", or any soundness question.
 ---
 
 # Rust unsafe -- Frameport
@@ -65,10 +65,10 @@ Every JNI entry point uses `#[unsafe(no_mangle)]` (Rust 2024 syntax) and `extern
 
 ```rust
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_FujiBindings_jniCreate(
-    env: EnvUnowned<'_>,
-    _thiz: JObject,
-    config_json: JString,
+pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_FujiBindings_jniCreate<'local>(
+    mut env: JNIEnv<'local>,
+    _thiz: JClass<'local>,
+    config_json: JString<'local>,
 ) -> jlong {
     session_create_entry(env, config_json)
 }
@@ -76,21 +76,29 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_FujiBindings_jniCr
 
 ### Panic safety at the FFI boundary
 
-Unwinding across `extern "system"` is UB. All JNI entry points MUST catch panics. The project uses `EnvUnowned::with_env` + `Outcome`:
+Unwinding across `extern "system"` is UB. All JNI entry points MUST catch panics using `std::panic::catch_unwind`:
 
 ```rust
-pub(crate) fn proxy_create_entry(mut env: EnvUnowned<'_>, config_json: JString) -> jlong {
-    match env.with_env(move |env| -> jni::errors::Result<jlong> {
-        Ok(create_session(env, config_json))
-    }).into_outcome() {
-        Outcome::Ok(handle) => handle,
-        Outcome::Err(err) => { /* throw Java exception, return 0 */ }
-        Outcome::Panic(payload) => { /* throw Java exception with panic message, return 0 */ }
+pub(crate) fn proxy_create_entry<'local>(mut env: JNIEnv<'local>, config_json: JString<'local>) -> jlong {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> jni::errors::Result<jlong> {
+        Ok(create_session(&mut env, config_json))
+    }));
+    match result {
+        Ok(Ok(handle)) => handle,
+        Ok(Err(jni::errors::Error::JavaException)) => 0, // exception already pending on env
+        Ok(Err(e)) => {
+            let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
+            0
+        }
+        Err(_panic_payload) => {
+            let _ = env.throw_new("java/lang/RuntimeException", "native panic in proxy_create_entry");
+            0
+        }
     }
 }
 ```
 
-**Rule:** Never write a bare `extern "system" fn` body without `with_env`/`catch_unwind` wrapping.
+**Rule:** Never write a bare `extern "system" fn` body without `catch_unwind` wrapping. After throwing a Java exception via `env.throw_new`, return the sentinel value immediately without calling further JNI methods.
 
 ### JString::from_raw and JLongArray::from_raw
 
@@ -102,16 +110,19 @@ These take ownership of a raw JNI local reference. Safety invariants:
 ```rust
 // Safety: `raw` is a valid jstring local ref returned by the JVM;
 // null-checked above; consumed exactly once.
-let string = unsafe { JString::from_raw(env, raw) };
+let string = unsafe { JString::from_raw(raw) };
 ```
 
-### EnvUnowned::from_raw
+### JavaVM::get_java_vm_pointer and JNIEnv access in tests
 
-Used in tests to convert a raw `JNIEnv` pointer. The resulting `EnvUnowned` must not outlive the `Env` it was derived from:
+In tests or low-level code that starts with a raw JNI pointer, use `JavaVM::from_raw` (unsafe) to reconstruct the VM handle, then call `vm.get_env()` or `vm.attach_current_thread()` to obtain a scoped `JNIEnv`. Do not cache or transmute raw `*mut JNIEnv` pointers — always go through the `jni` crate's lifetime-parameterized types:
 
 ```rust
-// Safety: env pointer is valid for the lifetime of the Env borrow.
-unsafe { EnvUnowned::from_raw(env.get_raw()) }
+// Safety: `raw_vm` is a valid JavaVM pointer valid for program lifetime
+// (stored in the JNI_OnLoad static). get_env() returns JNIEnv<'_> scoped
+// to this call; it must not be stored across thread boundaries.
+let vm = unsafe { JavaVM::from_raw(raw_vm)? };
+let mut env = vm.get_env()?;
 ```
 
 ### JavaVM::from_raw — liveness invariant
@@ -293,7 +304,7 @@ When reviewing an `unsafe` block:
 
 - [ ] Is there a `// Safety:` comment explaining which invariant is upheld?
 - [ ] For raw pointers: non-null, aligned, initialized, valid lifetime?
-- [ ] For `extern "system"` JNI: is the body wrapped in `with_env`/`catch_unwind`?
+- [ ] For `extern "system"` JNI: is the body wrapped in `std::panic::catch_unwind(std::panic::AssertUnwindSafe(...))`?
 - [ ] For JNI object construction (`from_raw`): is the raw ref valid and consumed exactly once?
 - [ ] For `mem::zeroed()`: is the type a plain C struct with no Rust invariants?
 - [ ] For ioctl: is fd valid, struct populated correctly, return value checked?
@@ -309,7 +320,7 @@ When reviewing an `unsafe` block:
 ```
 Legitimate (already present):
   - JNI FFI exports (#[unsafe(no_mangle)], extern "system")
-  - JNI object construction (JString::from_raw, EnvUnowned::from_raw)
+  - JNI object construction (JString::from_raw, JavaVM::from_raw)
   - Linux TUN device (ioctl, mem::zeroed, union field access, raw fd)
   - Signal handling (ignore_sigpipe)
 
