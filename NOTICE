@@ -1,0 +1,172 @@
+# Frameport Notice
+
+Frameport is an independent, unofficial Android camera companion app focused on local camera workflows such as camera connection diagnostics, Wi-Fi PTP-IP image import, BLE-assisted handoff, remote control, and future live-view support.
+
+Frameport is not affiliated with, endorsed by, sponsored by, or supported by Fujifilm.
+
+## Trademark Notice
+
+Fujifilm, FUJIFILM, FUJIFILM XApp, X Series, GFX, and related product names are trademarks or registered trademarks of their respective owners.
+
+These names are used only to identify interoperability targets and compatible camera systems. Frameport does not imply official certification, partnership, endorsement, or support.
+
+## Project Ownership
+
+Frameport source code, documentation, UI, icons, branding, and assets are original to this project unless explicitly stated otherwise.
+
+Any third-party material must be included only under compatible license terms. Contributors must not copy proprietary vendor material into the repository.
+
+## Interoperability References
+
+Frameport may consult public, open-source, or clean-room interoperability references to understand camera behavior, protocol design, Android platform edge cases, and testing strategies. References are not the same as bundled dependencies.
+
+Possible interoperability references:
+
+```text
+Possible interoperability references:
+  - Open-source Fujifilm camera protocol projects
+  - Open-source PTP / PTP-IP tools
+  - Open-source camera tethering tools
+  - Public Android Bluetooth, Wi-Fi, USB, and MediaStore documentation
+  - Project-owned packet captures from personally owned hardware, if sanitized
+  - Project-owned clean-room protocol notes
+```
+
+Examples of public interoperability references that may be studied:
+
+```text
+Examples of public interoperability references that may be studied:
+  - libfuji
+  - Fudge
+  - fuji-cam-wifi-tool
+  - gphoto2 / libgphoto2
+```
+
+Studying a reference does not mean code was copied from it. If code is ever copied, linked, vendored, or adapted, its license must be reviewed and documented separately. GPL, LGPL, MIT, Apache-2.0, BSD, MPL, and other licenses have different obligations. Contributors must not assume all open-source code can be copied into Frameport.
+
+## Prohibited Materials
+
+The following materials must not be added to the repository:
+
+* Proprietary Fujifilm APKs
+* Decompiled proprietary source code
+* Extracted native libraries from official apps
+* Official app icons, images, layouts, strings, or branding assets
+* Official app configuration files containing vendor keys or credentials
+* Hardcoded vendor API keys
+* Cognito, OAuth, or cloud tokens
+* Vendor cloud endpoint lists copied from official apps
+* Firmware binaries
+* Camera Wi-Fi passwords
+* Pairing secrets
+* Full camera serial numbers
+* Private MAC addresses
+* Private packet captures
+* Real user photos or private media files
+* Release signing keys
+* Keystore files
+* CI secrets
+
+If any such material is accidentally committed, treat it as a security incident and follow `SECURITY.md`.
+
+## Third-Party Dependencies
+
+Third-party dependencies should be tracked through normal Android and Rust dependency tooling once the project scaffold exists. Do not invent dependency versions in notice text; use the build files and dependency reports as the source of truth.
+
+Expected dependency categories may include:
+
+```text
+Android dependencies:
+  - AndroidX
+  - Jetpack Compose
+  - Material 3
+  - Navigation
+  - Hilt / Dagger
+  - Room
+  - DataStore
+  - Kotlin Coroutines
+  - Kotlin serialization, if used
+  - Bluetooth helper libraries, if used
+
+Rust dependencies:
+  - JNI bindings
+  - error handling crates
+  - tracing/logging crates
+  - binary parsing crates
+  - testing/fuzzing crates
+
+Tooling:
+  - Gradle plugins
+  - Android Gradle Plugin
+  - Rust toolchain
+  - cargo-ndk
+```
+
+Every new dependency should be evaluated for license compatibility, maintenance status, security posture, transitive dependency impact, whether it touches Bluetooth, Wi-Fi, USB, cryptography, storage, networking, or native code, and whether it introduces telemetry or cloud behavior.
+
+## Binary Dependencies
+
+Frameport should not vendor closed-source binary dependencies unless there is an explicit architecture decision and license review.
+
+The repository must not include:
+
+* Official Fujifilm SDK binaries
+* Extracted Fujifilm native libraries
+* Extracted official app resources
+* Firmware binaries
+* Proprietary camera files
+
+If an official SDK is ever considered, it must be handled through a separate ADR and license-compliance review before any binary is added.
+
+## Generated Code
+
+Generated code may include Hilt/Dagger generated files, Room generated code, Navigation generated artifacts if any, UniFFI generated bindings if used later, and Rust bindgen output if used later.
+
+Generated code should not be manually edited unless that exception is explicitly documented. Generated code should only be committed if the repository intentionally tracks it; otherwise it should be treated as build output and ignored.
+
+## Documentation and Research Notes
+
+Research notes are allowed only if they are sanitized and original.
+
+Allowed research material includes:
+
+* Original summaries
+* Clean-room behavior descriptions
+* Sanitized packet diagrams
+* Typed protocol assumptions
+* Compatibility findings
+* Hardware test notes
+* Failure mode documentation
+
+Forbidden research material includes:
+
+* Copied decompiled source
+* Copied proprietary strings
+* Private credentials
+* Unsanitized packet captures
+* Full hardware identifiers
+* Personal data
+
+## Adding New Notices
+
+When adding a dependency, borrowed code, vendored component, generated binding, or third-party asset, contributors must update notice and license documentation as needed.
+
+Before adding third-party material:
+
+```text
+Before adding third-party material:
+  1. Identify the source.
+  2. Identify the license.
+  3. Check compatibility with Frameport.
+  4. Check attribution requirements.
+  5. Check whether source disclosure is required.
+  6. Check whether binary redistribution is allowed.
+  7. Add attribution or license notice if required.
+  8. Document architectural impact if relevant.
+```
+
+## Relationship to Other Files
+
+`README.md` explains the project mission and architecture. `CONTRIBUTING.md` explains contribution rules. `SECURITY.md` explains vulnerability reporting and sensitive data handling. `AGENTS.md` explains AI agent and coding-agent behavior. ADRs under `docs/adr/` should record major architectural or license-impacting decisions.
+
+Do not create or modify those files as part of notice-only maintenance unless a future repository documentation index explicitly requires it.
