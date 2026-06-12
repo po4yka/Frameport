@@ -8,11 +8,13 @@ Optional tooling that accelerates AI-assisted development on Frameport. None of 
 
 | Server | Purpose | Launch | Prerequisites |
 |---|---|---|---|
-| `android-docs` | Live developer.android.com lookup (class/API/permission search) — keeps the agent from guessing platform APIs | `npx -y android-docs-mcp` | Node/npx |
-| `gradle` | Gradle introspection: tasks, filtered test runs with stack traces, dependency browser | `jbang run --quiet --fresh gradle-mcp@rnett` | **JDK 25+** and **jbang** (`brew install jbangdev/tap/jbang`) |
-| `android-device` | ADB device/emulator control: install, screenshot, logcat, UI automation | `npx -y claude-in-mobile@latest` | `adb` on PATH |
+| `android-docs` | Live developer.android.com lookup (class/API/permission search) — keeps the agent from guessing platform APIs | `npx -y android-docs-mcp@1.0.1` | Node/npx |
+| `gradle` | Gradle introspection: tasks, filtered test runs with stack traces, dependency browser | `jbang run --quiet dev.rnett.gradle-mcp:gradle-mcp:0.0.11` | **JDK 25+** and **jbang** (`brew install jbangdev/tap/jbang`) |
+| `android-device` | ADB device/emulator control: install, screenshot, logcat, UI automation | `npx -y claude-in-mobile@3.13.0` | `adb` on PATH |
 
 Status note: the `gradle` server needs JDK 25+ and jbang; the repo currently builds on JDK 17/21, so install those before enabling it (or remove the `gradle` entry). `android-docs` and `android-device` work with the standard toolchain.
+
+**Supply-chain pinning.** Every server is pinned to an exact, immutable version (no `@latest` / `--fresh` / mutable `+` — those re-fetch whatever upstream currently publishes on each launch, which is unreviewable remote code execution). The `gradle` server uses the immutable Maven coordinate rather than the mutable `gradle-mcp@rnett` jbang alias. To upgrade a server, review the upstream changes at the new version, then bump the pin here and in `.mcp.json` in the same commit. Note that `npx` still resolves from the npm registry at run time without an integrity hash; for full integrity, vendor the server or install it into a workspace with a committed lockfile.
 
 The `android-docs` server is the highest-value one: it directly prevents the kind of fabricated Android API names that adversarial review otherwise has to catch.
 
