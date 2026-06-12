@@ -22,8 +22,8 @@ import dev.po4yka.frameport.camera.usb.CameraUsbConnector
 import dev.po4yka.frameport.camera.usb.NoOpCameraUsbConnector
 import dev.po4yka.frameport.camera.wifi.CameraWifiConnector
 import dev.po4yka.frameport.camera.wifi.NoOpCameraWifiConnector
-import dev.po4yka.frameport.nativebridge.fujirustandroid.NativeFujiSdk
-import dev.po4yka.frameport.nativebridge.fujirustandroid.NoOpNativeFujiSdk
+import dev.po4yka.frameport.nativebridge.JniNativeFujiSdk
+import dev.po4yka.frameport.nativebridge.NativeFujiSdk
 import javax.inject.Singleton
 
 @Module
@@ -67,5 +67,5 @@ object CameraBindingsModule {
 
     @Provides
     @Singleton
-    fun providesNativeFujiSdk(): NativeFujiSdk = NoOpNativeFujiSdk()
+    fun providesNativeFujiSdk(): NativeFujiSdk = JniNativeFujiSdk()
 }

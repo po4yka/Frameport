@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "crates/fuji-core",
+    "crates/fuji-ptp",
+    "crates/fuji-ptpip",
+    "crates/fuji-transfer",
+    "crates/fuji-liveview",
+    "crates/fuji-ble-protocol",
+    "crates/fuji-usb-ptp",
+    "crates/fuji-diagnostics",
+    "crates/fuji-sim",
+    "crates/fuji-ffi",
+    "crates/fuji-cli",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+fuji-core = { path = "crates/fuji-core" }
+fuji-ptp = { path = "crates/fuji-ptp" }
+fuji-ptpip = { path = "crates/fuji-ptpip" }
+fuji-transfer = { path = "crates/fuji-transfer" }
+fuji-liveview = { path = "crates/fuji-liveview" }
+fuji-ble-protocol = { path = "crates/fuji-ble-protocol" }
+fuji-usb-ptp = { path = "crates/fuji-usb-ptp" }
+fuji-diagnostics = { path = "crates/fuji-diagnostics" }
+fuji-sim = { path = "crates/fuji-sim" }
+jni = "0.21"
+thiserror = "2"

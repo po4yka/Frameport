@@ -11,3 +11,5 @@ app/build/
 *.jks
 *.apk
 *.aab
+rust/fuji-rs/target/
+native/fuji-rust-android/src/main/jniLibs/
