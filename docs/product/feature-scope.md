@@ -8,6 +8,14 @@ Scope control is critical because camera companion apps can easily expand into m
 
 Frameport starts narrow: reliable local camera connection and import first.
 
+## Current App Shell
+
+The current Android shell is an implementation scaffold, not real camera support. It includes a Material 3 app scaffold, typed Navigation 3 destinations, feature route composables, Hilt ViewModels, `StateFlow` UI state, and placeholder screens for onboarding, home, camera scan, manual camera connection, gallery, import queue, remote shutter, live view, diagnostics, and settings.
+
+The home screen exposes the intended product surfaces while marking unavailable items as planned or not implemented yet. Connection screens simulate placeholder UI states only: idle, scanning, camera found, requesting Wi-Fi, opening session, connected, and error. Gallery and import use empty states backed by no-op/fake repositories. Remote and live view are planned placeholders only.
+
+This shell must not be treated as compatibility evidence. It does not scan Bluetooth, request Wi-Fi networks, open USB devices, access MediaStore, call JNI, speak PTP/PTP-IP, trigger capture, parse live view, or communicate with a camera.
+
 ## Product Positioning
 
 Frameport is:
