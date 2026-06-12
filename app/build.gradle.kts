@@ -54,6 +54,26 @@ android {
 }
 
 dependencies {
+    implementation(projects.feature.onboarding)
+    implementation(projects.feature.connection)
+    implementation(projects.feature.gallery)
+    implementation(projects.feature.`import`)
+    implementation(projects.feature.remote)
+    implementation(projects.feature.liveview)
+    implementation(projects.feature.settings)
+    implementation(projects.feature.diagnostics)
+    implementation(projects.camera.api)
+    implementation(projects.camera.data)
+    implementation(projects.camera.bluetooth)
+    implementation(projects.camera.wifi)
+    implementation(projects.camera.usb)
+    implementation(projects.camera.media)
+    implementation(projects.camera.diagnostics)
+    implementation(projects.native.fujiRustAndroid)
+    implementation(projects.core.common)
+    implementation(projects.core.model)
+    implementation(projects.core.designsystem)
+
     implementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(platform(libs.androidx.compose.bom))
 
