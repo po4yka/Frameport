@@ -133,8 +133,12 @@ docs/protocol/{wifi-ptp-ip,usb-ptp,bluetooth-le,liveview,media-transfer,
                error-model,compatibility-matrix,geoposition-sharing}.md
 docs/rust/{sdk-design,ffi-boundary,fd-ownership,error-handling,building}.md
 docs/product/feature-scope.md
+docs/reference/{README,index-and-methodology,ptp-ptpip,
+               transfer-liveview,ble-wifi-discovery}.md
 README.md  CONTRIBUTING.md  SECURITY.md  NOTICE  LICENSE (Apache-2.0)
 ```
+
+`docs/reference/` holds clean-room interoperability notes distilled from external open-source RE references and the reversed XApp — protocol facts (packet layouts, handshakes, opcodes, GATT UUIDs) only, never copied code. They are empirical backing for the authored `docs/protocol/` specs.
 
 ## Hard Boundaries
 
