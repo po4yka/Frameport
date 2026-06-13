@@ -302,16 +302,19 @@ async fn happy_path_handshake() {
         // ── Step 4: SetDevicePropValue (mode write = SetFunctionMode) ─────────
         // ptp-ptpip.md section 5.2: opcode=SET_DEVICE_PROP_VALUE on a mode property.
         // busy_count=0 → must return OK on the first attempt.
-        let set_mode_resp = op_no_data(
+        // ClientState (0xDF01) is UINT16 — 2-byte payload, value=1 (IMAGE_RECEIVE).
+        // master-constants.md §3b. [H]
+        let set_mode_code = op_set_prop_value(
             &mut cmd_stream,
-            opcode::SET_DEVICE_PROP_VALUE,
             2,
-            vec![prop_code::CLIENT_STATE as u32],
+            prop_code::CLIENT_STATE,
+            &[1u8, 0u8], // IMAGE_RECEIVE = 1 as UINT16 LE
         )
         .await;
-        assert!(
-            matches!(&set_mode_resp, PtpIpPacket::OperationResponse { response_code, .. } if *response_code == response_code::OK),
-            "SetFunctionMode (busy_count=0) must return OK immediately, got {set_mode_resp:?}"
+        assert_eq!(
+            set_mode_code,
+            response_code::OK,
+            "SetFunctionMode (busy_count=0) must return OK immediately"
         );
 
         // ── Step 5: GetDevicePropValue(IMAGE_GET_VERSION) ─────────────────────
@@ -441,41 +444,34 @@ async fn busy_retry_sequence() {
 
         // ── Retry loop: expect BUSY × busy_count, then OK ─────────────────────
         // ptp-ptpip.md section 4.3: client retries up to MAX_BUSY_RETRIES=5 times.
+        // ClientState (0xDF01) is UINT16 — 2-byte payload. master-constants.md §3b. [H]
         let mut requests_sent: u32 = 0;
         let mut busy_count_observed: u32 = 0;
 
         loop {
             let txn_id = 1 + requests_sent; // transaction IDs must be unique per session
-            let resp = op_no_data(
+            let code = op_set_prop_value(
                 &mut cmd_stream,
-                opcode::SET_DEVICE_PROP_VALUE,
                 txn_id,
-                vec![prop_code::CLIENT_STATE as u32],
+                prop_code::CLIENT_STATE,
+                &[1u8, 0u8], // IMAGE_RECEIVE = 1 as UINT16 LE
             )
             .await;
             requests_sent += 1;
 
-            match &resp {
-                PtpIpPacket::OperationResponse { response_code, .. }
-                    if *response_code == response_code::BUSY =>
-                {
-                    busy_count_observed += 1;
-                    // No thread::sleep — retry immediately without real-time delay.
-                    // RETRY_DELAY_MS is a documented CLIENT policy constant; this
-                    // test verifies correctness, not real-time compliance.
-                    assert!(
-                        busy_count_observed <= busy_count,
-                        "received more BUSY responses ({busy_count_observed}) than configured ({busy_count})"
-                    );
-                }
-                PtpIpPacket::OperationResponse { response_code, .. }
-                    if *response_code == response_code::OK =>
-                {
-                    break;
-                }
-                other => {
-                    panic!("unexpected response on mode write: {other:?}");
-                }
+            if code == response_code::BUSY {
+                busy_count_observed += 1;
+                // No thread::sleep — retry immediately without real-time delay.
+                // RETRY_DELAY_MS is a documented CLIENT policy constant; this
+                // test verifies correctness, not real-time compliance.
+                assert!(
+                    busy_count_observed <= busy_count,
+                    "received more BUSY responses ({busy_count_observed}) than configured ({busy_count})"
+                );
+            } else if code == response_code::OK {
+                break;
+            } else {
+                panic!("unexpected response_code on mode write: 0x{code:04X}");
             }
         }
 
@@ -573,18 +569,15 @@ async fn fatal_error_termination() {
             );
 
             // Mode write: expect the configured fatal code, NOT BUSY and NOT OK.
-            let mode_resp = op_no_data(
+            // ClientState (0xDF01) is UINT16 — 2-byte payload. master-constants.md §3b. [H]
+            // The payload must pass width validation before the fatal_on_set_mode check fires.
+            let returned_code = op_set_prop_value(
                 &mut cmd_stream,
-                opcode::SET_DEVICE_PROP_VALUE,
                 1,
-                vec![prop_code::CLIENT_STATE as u32],
+                prop_code::CLIENT_STATE,
+                &[1u8, 0u8], // IMAGE_RECEIVE = 1 as UINT16 LE
             )
             .await;
-
-            let returned_code = match &mode_resp {
-                PtpIpPacket::OperationResponse { response_code, .. } => *response_code,
-                other => panic!("[{label}] expected OperationResponse, got {other:?}"),
-            };
 
             assert_eq!(
                 returned_code, fatal_code,
@@ -1022,5 +1015,200 @@ async fn two_socket_event_handshake() {
         .expect("two_socket_event_handshake timed out");
 
     // Shutdown-clean: signal server stop; the timeout above ensures no hang.
+    handle.shutdown();
+}
+
+// ── Scenario 7: set_device_prop_payload_validation ───────────────────────────
+
+/// Sends a `SetDevicePropValue` with a data phase on the command socket.
+///
+/// The data phase follows ptp-ptpip.md section 4.9:
+///   OperationRequest (data_phase=2) → StartData → EndData → (read OperationResponse)
+///
+/// Returns the `response_code` from the server's `OperationResponse`.
+///
+// NOT cancel-safe: multiple sequential `.await` points with stream state.
+async fn op_set_prop_value(stream: &mut TcpStream, txn_id: u32, prop: u16, payload: &[u8]) -> u16 {
+    // OperationRequest with data_phase=2 signals a write with data phase.
+    // ptp-ptpip.md section 4.9. [H]
+    send_packet(
+        stream,
+        &PtpIpPacket::OperationRequest {
+            data_phase: 2,
+            opcode: opcode::SET_DEVICE_PROP_VALUE,
+            transaction_id: txn_id,
+            params: vec![prop as u32],
+        },
+    )
+    .await;
+
+    // StartData — total_data_length = payload.len().
+    let payload_len = payload.len() as u64;
+    send_packet(
+        stream,
+        &PtpIpPacket::StartData {
+            transaction_id: txn_id,
+            total_data_length: payload_len,
+        },
+    )
+    .await;
+
+    // EndData — carries the value bytes.
+    send_packet(
+        stream,
+        &PtpIpPacket::EndData {
+            transaction_id: txn_id,
+            payload: payload.to_vec(),
+        },
+    )
+    .await;
+
+    // Read the server's OperationResponse.
+    let resp = recv_packet(stream).await;
+    match resp {
+        PtpIpPacket::OperationResponse { response_code, .. } => response_code,
+        other => panic!("expected OperationResponse after SetDevicePropValue, got {other:?}"),
+    }
+}
+
+/// Tests SetDevicePropValue payload validation over a live server connection.
+///
+/// Asserts:
+///   1. A well-formed `ClientState` write (UINT16, 2 bytes) with busy_count=0
+///      returns `response_code::OK`.
+///   2. A malformed `ClientState` write with an **empty** data-phase payload
+///      returns `response_code::PARAMETER_NOT_SUPPORTED`.
+///   3. A malformed `ClientState` write with a **wrong-width** (3-byte) payload
+///      returns `response_code::PARAMETER_NOT_SUPPORTED`.
+///   4. A well-formed `ImageGetVersion` write (UINT32, 4 bytes) with busy_count=0
+///      returns `response_code::OK`.
+///   5. A malformed `ImageGetVersion` write with a **2-byte** payload
+///      returns `response_code::PARAMETER_NOT_SUPPORTED`.
+///
+/// Property widths:
+///   - `ClientState`     (0xDF01) — UINT16, 2 bytes. master-constants.md §3b. [H]
+///   - `ImageGetVersion` (0xDF21) — UINT32, 4 bytes. master-constants.md §3b. [H]
+///
+/// Validation must fire **before** the busy_count/fatal_on_set_mode logic: the server
+/// is configured with busy_count=0 and no fatal override so a successful well-formed
+/// write returns OK immediately.
+///
+/// No `thread::sleep`, ephemeral ports only, timeout-bounded at 5 s.
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+#[tokio::test]
+async fn set_device_prop_payload_validation() {
+    let config = FakeCameraBuilder::new()
+        .busy_count(0) // well-formed writes must return OK on first attempt
+        .build();
+
+    let server = FakeCameraServer::bind(config).await.expect("bind");
+    let cmd_addr = server.bound_addr();
+    let event_addr = server.event_addr();
+    let handle = server.run();
+
+    let test_body = timeout(Duration::from_secs(5), async {
+        let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
+
+        // Two-socket handshake.
+        let _ = handshake(&mut cmd_stream, &mut event_stream).await;
+
+        // OpenSession (required before property operations).
+        let open_resp =
+            op_no_data(&mut cmd_stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+        assert!(
+            matches!(&open_resp, PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK),
+            "OpenSession must return OK, got {open_resp:?}"
+        );
+
+        // ── Case 1: well-formed ClientState write (UINT16, 2 bytes) → OK ─────
+        // ClientState (0xDF01) is UINT16. master-constants.md §3b. [H]
+        let code_1 = op_set_prop_value(
+            &mut cmd_stream,
+            1,
+            prop_code::CLIENT_STATE,
+            &[1u8, 0u8], // IMAGE_RECEIVE mode = 1 as UINT16 LE
+        )
+        .await;
+        assert_eq!(
+            code_1,
+            response_code::OK,
+            "well-formed ClientState write must return OK (busy_count=0)"
+        );
+
+        // ── Case 2: malformed ClientState — empty payload → PARAMETER_NOT_SUPPORTED
+        let code_2 = op_set_prop_value(
+            &mut cmd_stream,
+            2,
+            prop_code::CLIENT_STATE,
+            &[], // 0 bytes — wrong width for UINT16
+        )
+        .await;
+        assert_eq!(
+            code_2,
+            response_code::PARAMETER_NOT_SUPPORTED,
+            "empty payload for ClientState must return PARAMETER_NOT_SUPPORTED"
+        );
+
+        // ── Case 3: malformed ClientState — wrong-width (3 bytes) → PARAMETER_NOT_SUPPORTED
+        let code_3 = op_set_prop_value(
+            &mut cmd_stream,
+            3,
+            prop_code::CLIENT_STATE,
+            &[1u8, 0u8, 0u8], // 3 bytes — wrong width for UINT16
+        )
+        .await;
+        assert_eq!(
+            code_3,
+            response_code::PARAMETER_NOT_SUPPORTED,
+            "3-byte payload for ClientState (UINT16) must return PARAMETER_NOT_SUPPORTED"
+        );
+
+        // ── Case 4: well-formed ImageGetVersion write (UINT32, 4 bytes) → OK ──
+        // ImageGetVersion (0xDF21) is UINT32. master-constants.md §3b. [H]
+        let code_4 = op_set_prop_value(
+            &mut cmd_stream,
+            4,
+            prop_code::IMAGE_GET_VERSION,
+            &[0x04u8, 0x00u8, 0x02u8, 0x00u8], // 0x00020004 LE
+        )
+        .await;
+        assert_eq!(
+            code_4,
+            response_code::OK,
+            "well-formed ImageGetVersion write must return OK (busy_count=0)"
+        );
+
+        // ── Case 5: malformed ImageGetVersion — 2 bytes instead of 4 → PARAMETER_NOT_SUPPORTED
+        let code_5 = op_set_prop_value(
+            &mut cmd_stream,
+            5,
+            prop_code::IMAGE_GET_VERSION,
+            &[0x04u8, 0x00u8], // 2 bytes — wrong width for UINT32
+        )
+        .await;
+        assert_eq!(
+            code_5,
+            response_code::PARAMETER_NOT_SUPPORTED,
+            "2-byte payload for ImageGetVersion (UINT32) must return PARAMETER_NOT_SUPPORTED"
+        );
+
+        // ── Graceful close ────────────────────────────────────────────────────
+        let close_resp = op_no_data(&mut cmd_stream, opcode::CLOSE_SESSION, 6, vec![]).await;
+        assert!(
+            matches!(&close_resp, PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK),
+            "CloseSession must return OK, got {close_resp:?}"
+        );
+
+        drop(cmd_stream);
+        drop(event_stream);
+    });
+
+    test_body
+        .await
+        .expect("set_device_prop_payload_validation timed out");
+
     handle.shutdown();
 }

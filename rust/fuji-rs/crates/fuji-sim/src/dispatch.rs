@@ -111,10 +111,61 @@ pub fn dispatch_operation(
         // ── SetDevicePropValue (0x1016) ───────────────────────────────────────
         // "SetFunctionMode": SET_DEVICE_PROP_VALUE on the mode property.
         // ptp-ptpip.md section 5.2: dispatched on (opcode=0x1016, params[0]=prop_code).
-        // The server emits BUSY for `busy_count` calls then OK. If fatal_on_set_mode
-        // is configured it always returns that status code instead.
+        // The server validates the data-phase payload width for known property codes
+        // before applying the busy_count/fatal_on_set_mode logic.
         op if op == opcode::SET_DEVICE_PROP_VALUE => {
-            let _ = data_payload; // consumed by caller; not needed for response logic
+            let prop = params.first().copied().map(|p| p as u16);
+
+            // Validate data-phase payload width for known properties.
+            // Missing data phase on any set operation is a framing error.
+            // Wrong width for a known property returns PARAMETER_NOT_SUPPORTED
+            // (0x2006) — the value cannot be accepted per the property contract.
+            //
+            // Property widths sourced from master-constants.md §3b:
+            //   ClientState      (0xDF01) — UINT16 — 2 bytes [H]
+            //   ImageGetVersion  (0xDF21) — UINT32 — 4 bytes [H]
+            //   CameraState      (0xDF00) — UINT16 — 2 bytes [H]
+            //   EnableCorrectFileSize (0xD227) — UINT16 — 2 bytes [H]
+            if let Some(prop_u16) = prop {
+                let expected_width: Option<usize> = if prop_u16 == prop_code::IMAGE_GET_VERSION {
+                    Some(4) // UINT32 — master-constants.md §3b
+                } else if prop_u16 == prop_code::CLIENT_STATE
+                    || prop_u16 == prop_code::CAMERA_STATE
+                    || prop_u16 == prop_code::ENABLE_CORRECT_FILE_SIZE
+                {
+                    Some(2) // UINT16 — master-constants.md §3b
+                } else {
+                    None // unknown property: no width check
+                };
+
+                if let Some(width) = expected_width {
+                    match data_payload {
+                        None => {
+                            // SetDevicePropValue on a known writable property with no data phase
+                            // is a structural protocol violation — the framing is broken.
+                            return Err(SimError::ProtocolViolation(format!(
+                                "SetDevicePropValue(prop=0x{prop_u16:04X}): missing data phase; expected {width}-byte payload"
+                            )));
+                        }
+                        Some(payload) if payload.len() != width => {
+                            // Wrong-width payload for a known property: the value cannot be
+                            // accepted. Return PARAMETER_NOT_SUPPORTED (0x2006) — the
+                            // parameter's encoded form is not acceptable per ISO 15740 §12.
+                            // ptp-ptpip.md section 6.1 / master-constants.md §4b.
+                            return Ok(vec![PtpIpPacket::OperationResponse {
+                                response_code: response_code::PARAMETER_NOT_SUPPORTED,
+                                transaction_id,
+                                result_params: vec![],
+                            }]);
+                        }
+                        Some(_) => {
+                            // Payload is present and the correct width — proceed to
+                            // busy_count / fatal_on_set_mode logic below.
+                        }
+                    }
+                }
+            }
+
             if let Some(fatal_code) = config.fatal_on_set_mode {
                 return Ok(vec![PtpIpPacket::OperationResponse {
                     response_code: fatal_code,
@@ -402,13 +453,17 @@ mod tests {
         let config = FakeCameraBuilder::new().busy_count(2).build();
         let mut state = DispatchState::new(&config);
 
+        // IMAGE_GET_VERSION (0xDF21) is UINT32 — payload must be exactly 4 bytes.
+        // master-constants.md §3b. [H]
+        let valid_payload: &[u8] = &[0x04u8, 0x00u8, 0x02u8, 0x00u8]; // 0x00020004 LE
+
         // First two calls → BUSY
         for _ in 0..2 {
             let pkts = dispatch_operation(
                 opcode::SET_DEVICE_PROP_VALUE,
                 1,
                 &[prop_code::IMAGE_GET_VERSION as u32],
-                Some(&[1u8, 0u8]),
+                Some(valid_payload),
                 &mut state,
                 &config,
             )
@@ -425,7 +480,7 @@ mod tests {
             opcode::SET_DEVICE_PROP_VALUE,
             2,
             &[prop_code::IMAGE_GET_VERSION as u32],
-            Some(&[1u8, 0u8]),
+            Some(valid_payload),
             &mut state,
             &config,
         )
@@ -616,5 +671,264 @@ mod tests {
                 props
             );
         }
+    }
+
+    // ── SetDevicePropValue payload-validation unit tests ──────────────────────
+
+    /// A well-formed ClientState write (UINT16, 2 bytes) with busy_count=0 must
+    /// return OK.
+    ///
+    /// ClientState (0xDF01) is UINT16 — 2 bytes per master-constants.md §3b. [H]
+    #[test]
+    fn set_client_state_well_formed_returns_ok() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        // UINT16 LE payload: value=1 (IMAGE_RECEIVE mode)
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::CLIENT_STATE as u32],
+            Some(&[1u8, 0u8]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "well-formed ClientState write (busy_count=0) must return OK; got {pkts:?}"
+        );
+    }
+
+    /// A ClientState write with a wrong-width payload (3 bytes instead of 2) must
+    /// return PARAMETER_NOT_SUPPORTED (0x2006) rather than OK or BUSY.
+    ///
+    /// ClientState (0xDF01) is UINT16 — 2 bytes per master-constants.md §3b. [H]
+    /// PARAMETER_NOT_SUPPORTED: ptp-ptpip.md section 6.1 / master-constants.md §4b.
+    #[test]
+    fn set_client_state_wrong_width_returns_parameter_not_supported() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        // 3-byte payload for a UINT16 property — wrong width.
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::CLIENT_STATE as u32],
+            Some(&[1u8, 0u8, 0u8]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::PARAMETER_NOT_SUPPORTED
+            ),
+            "wrong-width ClientState write must return PARAMETER_NOT_SUPPORTED; got {pkts:?}"
+        );
+    }
+
+    /// A ClientState write with an empty payload must return PARAMETER_NOT_SUPPORTED.
+    ///
+    /// An empty data-phase for a known property is also a width violation (0 ≠ 2).
+    #[test]
+    fn set_client_state_empty_payload_returns_parameter_not_supported() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::CLIENT_STATE as u32],
+            Some(&[]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::PARAMETER_NOT_SUPPORTED
+            ),
+            "empty payload for ClientState must return PARAMETER_NOT_SUPPORTED; got {pkts:?}"
+        );
+    }
+
+    /// A ClientState write with no data phase at all (None) on a known property must
+    /// return a ProtocolViolation error — the framing itself is broken.
+    ///
+    /// ptp-ptpip.md section 4.9: a write operation carries data_phase=2; the server
+    /// reads StartData→EndData before dispatch. None here means the caller did not
+    /// supply any data phase bytes, which is a structural framing error. [H]
+    #[test]
+    fn set_client_state_no_data_phase_is_protocol_violation() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        let result = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::CLIENT_STATE as u32],
+            None, // no data phase supplied for a known write property
+            &mut state,
+            &config,
+        );
+        assert!(
+            matches!(result, Err(SimError::ProtocolViolation(_))),
+            "missing data phase for ClientState must be a ProtocolViolation; got {result:?}"
+        );
+    }
+
+    /// An ImageGetVersion write with a wrong-width payload (2 bytes instead of 4) must
+    /// return PARAMETER_NOT_SUPPORTED.
+    ///
+    /// ImageGetVersion (0xDF21) is UINT32 — 4 bytes per master-constants.md §3b. [H]
+    #[test]
+    fn set_image_get_version_wrong_width_returns_parameter_not_supported() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        // 2-byte payload for a UINT32 property — wrong width.
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::IMAGE_GET_VERSION as u32],
+            Some(&[0x04u8, 0x00u8]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::PARAMETER_NOT_SUPPORTED
+            ),
+            "wrong-width ImageGetVersion write must return PARAMETER_NOT_SUPPORTED; got {pkts:?}"
+        );
+    }
+
+    /// An EnableCorrectFileSize write with wrong-width payload (1 byte instead of 2) must
+    /// return PARAMETER_NOT_SUPPORTED.
+    ///
+    /// EnableCorrectFileSize (0xD227) is UINT16 — 2 bytes per master-constants.md §3b. [H]
+    #[test]
+    fn set_enable_correct_file_size_wrong_width_returns_parameter_not_supported() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        // 1-byte payload for a UINT16 property — wrong width.
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::ENABLE_CORRECT_FILE_SIZE as u32],
+            Some(&[1u8]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::PARAMETER_NOT_SUPPORTED
+            ),
+            "wrong-width EnableCorrectFileSize write must return PARAMETER_NOT_SUPPORTED; got {pkts:?}"
+        );
+    }
+
+    /// A well-formed EnableCorrectFileSize write (UINT16, 2 bytes, value=1) with
+    /// busy_count=0 must still return OK — the existing busy/fatal logic is not regressed.
+    ///
+    /// EnableCorrectFileSize (0xD227) is UINT16 — 2 bytes per master-constants.md §3b. [H]
+    #[test]
+    fn set_enable_correct_file_size_well_formed_returns_ok() {
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::ENABLE_CORRECT_FILE_SIZE as u32],
+            Some(&[1u8, 0u8]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "well-formed EnableCorrectFileSize write (busy_count=0) must return OK; got {pkts:?}"
+        );
+    }
+
+    /// Payload-validation fires BEFORE busy_count logic: a wrong-width ClientState
+    /// write must return PARAMETER_NOT_SUPPORTED even when busy_count > 0.
+    ///
+    /// This ensures that the validation gate is not bypassed by the retry-state path.
+    #[test]
+    fn payload_validation_fires_before_busy_count() {
+        // busy_count=3 — if validation were skipped, we'd get BUSY instead.
+        let config = FakeCameraBuilder::new().busy_count(3).build();
+        let mut state = DispatchState::new(&config);
+        // 3-byte payload for UINT16 property — wrong width.
+        let pkts = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[prop_code::CLIENT_STATE as u32],
+            Some(&[1u8, 0u8, 0u8]),
+            &mut state,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::PARAMETER_NOT_SUPPORTED
+            ),
+            "wrong-width payload must return PARAMETER_NOT_SUPPORTED even with busy_count>0; got {pkts:?}"
+        );
+        // busy count must not have been decremented — the invalid write was rejected.
+        assert_eq!(
+            state.remaining_busy, 3,
+            "remaining_busy must not be decremented on a rejected write"
+        );
+    }
+
+    /// An unknown property code with no data phase passes through to BUSY/OK logic
+    /// (unknown properties are not validated for width).
+    ///
+    /// This matches the dispatch contract: only known property codes are width-checked.
+    #[test]
+    fn set_unknown_property_no_data_is_not_protocol_violation() {
+        // Unknown property 0xFFFF — not in the known-width table.
+        let config = FakeCameraBuilder::new().busy_count(0).build();
+        let mut state = DispatchState::new(&config);
+        let result = dispatch_operation(
+            opcode::SET_DEVICE_PROP_VALUE,
+            1,
+            &[0xFFFFu32],
+            None, // no data phase — allowed for unknown properties
+            &mut state,
+            &config,
+        );
+        // Must not be a ProtocolViolation — unknown props skip width validation.
+        assert!(
+            result.is_ok(),
+            "unknown property with None data must not be a ProtocolViolation; got {result:?}"
+        );
+        let pkts = result.unwrap();
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "unknown property with None data and busy_count=0 must return OK; got {pkts:?}"
+        );
     }
 }
