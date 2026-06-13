@@ -114,6 +114,11 @@ pub mod response_code {
     pub const FATAL_AUTH_FAILURE: u16 = 0x201D;
     /// `0x201E` SessionAlreadyOpen — triggers stale-session recovery.
     pub const SESSION_ALREADY_OPEN: u16 = 0x201E;
+    /// `0x2000` Fatal generic failure — abort connection immediately.
+    ///
+    /// Cited in ptp-ptpip.md section 7 as one of the fatal status codes that
+    /// abort the InitCommandAck handshake alongside `0x201D` and `0x201E`. [H]
+    pub const FATAL_GENERIC_FAILURE: u16 = 0x2000;
 }
 
 // ── Standard PTP event codes (section 10.1 / master-constants.md §4a) ────────

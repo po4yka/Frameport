@@ -32,3 +32,4 @@ fuji-diagnostics = { path = "crates/fuji-diagnostics" }
 fuji-sim = { path = "crates/fuji-sim" }
 jni = "0.21"
 thiserror = "2"
+tokio = { version = "1" }
