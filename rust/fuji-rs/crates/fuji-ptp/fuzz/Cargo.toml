@@ -1,0 +1,22 @@
+[package]
+name = "fuji-ptp-fuzz"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# This is a standalone workspace so it does NOT join the main fuji-rs workspace
+# and does NOT affect `cargo --workspace` gates (golden-bless-discipline / CI).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fuji-ptp = { path = ".." }
+
+[[bin]]
+name = "ptp_decode"
+path = "fuzz_targets/ptp_decode.rs"
+test = false
+doc = false
