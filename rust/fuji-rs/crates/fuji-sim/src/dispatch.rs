@@ -216,29 +216,64 @@ fn ok_response(transaction_id: u32) -> PtpIpPacket {
 
 // ── DeviceInfo dataset ────────────────────────────────────────────────────────
 
-/// Builds a minimal PTP DeviceInfo dataset payload.
+/// Operations advertised in the DeviceInfo OperationsSupported array.
 ///
-/// The format follows ISO 15740 §5.5.1. Fields are LE-encoded. We emit the
-/// minimum required for a test client to parse without error:
+/// These are the standard PTP opcodes used in a Fujifilm Wi-Fi image import
+/// session per ptp-ptpip.md sections 6.1 and 13.1. [H]
+/// Cited: master-constants.md §2a.
+const OPERATIONS_SUPPORTED: &[u16] = &[
+    opcode::GET_DEVICE_INFO, // 0x1001 — always first probe, no session required
+    opcode::OPEN_SESSION,    // 0x1002 — starts PTP session
+    opcode::CLOSE_SESSION,   // 0x1003 — ends PTP session
+    opcode::GET_DEVICE_PROP_DESC, // 0x1014 — capability query per property
+    opcode::GET_DEVICE_PROP_VALUE, // 0x1015 — read property value / keep-alive
+    opcode::SET_DEVICE_PROP_VALUE, // 0x1016 — write property / SetFunctionMode
+    opcode::GET_OBJECT_INFO, // 0x1008 — metadata for each media object
+    opcode::GET_OBJECT,      // 0x1009 — full object data
+    opcode::GET_THUMB,       // 0x100A — JPEG thumbnail
+    opcode::GET_PARTIAL_OBJECT, // 0x101B — 1 MB chunk download loop (Wi-Fi import)
+];
+
+/// Device properties advertised in the DeviceInfo DevicePropertiesSupported array.
 ///
-/// | Offset | Field | Value |
-/// |--------|-------|-------|
-/// | 0 | StandardVersion (u16) | 100 (PTP 1.0) |
-/// | 2 | VendorExtensionID (u32) | 0x00000006 (Fujifilm) |
-/// | 6 | VendorExtensionVersion (u16) | 100 |
-/// | 8 | VendorExtensionDesc (PTP string) | "FUJIFILM" |
-/// | … | FunctionalMode (u16) | 0 |
-/// | … | OperationsSupported (u16 array) | [] |
-/// | … | EventsSupported (u16 array) | [] |
-/// | … | DevicePropertiesSupported (u16 array) | [] |
-/// | … | CaptureFormats (u16 array) | [] |
-/// | … | ImageFormats (u16 array) | [] |
-/// | … | Manufacturer (PTP string) | "FUJIFILM" |
-/// | … | Model (PTP string) | "X-T5 (sim)" |
-/// | … | DeviceVersion (PTP string) | "1.00" |
-/// | … | SerialNumber (PTP string) | "0000000000" |
+/// These are the Fujifilm-specific property codes read/written in a Wi-Fi
+/// image import session per ptp-ptpip.md sections 5.2, 8.3, and 13.1. [H]
+/// Cited: master-constants.md §3b.
+const DEVICE_PROPERTIES_SUPPORTED: &[u16] = &[
+    prop_code::OBJECT_COUNT,             // 0xD222 — number of Wi-Fi objects
+    prop_code::EVENTS_LIST,              // 0xD212 — status poll / keep-alive
+    prop_code::IMAGE_GET_VERSION,        // 0xDF21 — capability gate: read then re-write
+    prop_code::CLIENT_STATE,             // 0xDF01 — write to request function mode
+    prop_code::CAMERA_STATE,             // 0xDF00 — poll for WAIT/MULTIPLE_TRANSFER/FULL_ACCESS
+    prop_code::ENABLE_CORRECT_FILE_SIZE, // 0xD227 — must set 1 before GetObjectInfo
+];
+
+/// Builds a PTP DeviceInfo dataset payload advertising a realistic Fujifilm
+/// Wi-Fi import capability set.
 ///
-/// Source: ptp-ptpip.md section 6.1 ("Returns manufacturer string FUJIFILM"). [H]
+/// The format follows ISO 15740 §5.5.1. All fields are LE-encoded.
+///
+/// | Offset | Field                      | Value                                      |
+/// |--------|----------------------------|--------------------------------------------|
+/// | 0      | StandardVersion (u16)      | 100 (PTP 1.0)                              |
+/// | 2      | VendorExtensionID (u32)    | 0x00000006 (Fujifilm)                      |
+/// | 6      | VendorExtensionVersion (u16)| 100                                       |
+/// | 8      | VendorExtensionDesc (PTP string)| "FUJIFILM"                            |
+/// | …      | FunctionalMode (u16)       | 0                                          |
+/// | …      | OperationsSupported (u16[])| see `OPERATIONS_SUPPORTED`                 |
+/// | …      | EventsSupported (u16[])    | [] (empty — events via EventsList poll)    |
+/// | …      | DevicePropertiesSupported (u16[])| see `DEVICE_PROPERTIES_SUPPORTED`   |
+/// | …      | CaptureFormats (u16[])     | [] (import-only sim, no capture)           |
+/// | …      | ImageFormats (u16[])       | [] (not required for import path)          |
+/// | …      | Manufacturer (PTP string)  | "FUJIFILM"                                 |
+/// | …      | Model (PTP string)         | "X-T5 (sim)"                               |
+/// | …      | DeviceVersion (PTP string) | "1.00"                                     |
+/// | …      | SerialNumber (PTP string)  | "0000000000"                               |
+///
+/// Sources:
+/// - ptp-ptpip.md section 6.1 ("Returns manufacturer string FUJIFILM"). [H]
+/// - ptp-ptpip.md section 4.12 (PTP array encoding: u32 count + count × element). [H]
+/// - master-constants.md §2a (opcode list), §3b (property code list). [H]
 // cancel-safe: synchronous — no .await points.
 fn build_device_info_dataset() -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
@@ -253,23 +288,24 @@ fn build_device_info_dataset() -> Vec<u8> {
     push_ptp_string(&mut buf, "FUJIFILM");
     // FunctionalMode: 0 — u16 LE
     buf.extend_from_slice(&0u16.to_le_bytes());
-    // OperationsSupported: empty u16 array (u32 count = 0)
+    // OperationsSupported: u16 array per ptp-ptpip.md section 4.12.
+    push_u16_array(&mut buf, OPERATIONS_SUPPORTED);
+    // EventsSupported: empty — Fujifilm delivers events via EventsList poll (0xD212),
+    // not unsolicited PTP events. ptp-ptpip.md section 8.3. [H]
     push_empty_u16_array(&mut buf);
-    // EventsSupported: empty u16 array
+    // DevicePropertiesSupported: u16 array per ptp-ptpip.md section 4.12.
+    push_u16_array(&mut buf, DEVICE_PROPERTIES_SUPPORTED);
+    // CaptureFormats: empty — this is an import-only simulator.
     push_empty_u16_array(&mut buf);
-    // DevicePropertiesSupported: empty u16 array
+    // ImageFormats: empty — not required for the Wi-Fi import path.
     push_empty_u16_array(&mut buf);
-    // CaptureFormats: empty u16 array
-    push_empty_u16_array(&mut buf);
-    // ImageFormats: empty u16 array
-    push_empty_u16_array(&mut buf);
-    // Manufacturer: "FUJIFILM"
+    // Manufacturer: "FUJIFILM" — ptp-ptpip.md section 6.1. [H]
     push_ptp_string(&mut buf, "FUJIFILM");
     // Model: "X-T5 (sim)"
     push_ptp_string(&mut buf, "X-T5 (sim)");
     // DeviceVersion: "1.00"
     push_ptp_string(&mut buf, "1.00");
-    // SerialNumber: "0000000000"
+    // SerialNumber: "0000000000" — clean-room placeholder, not a real serial.
     push_ptp_string(&mut buf, "0000000000");
 
     buf
@@ -291,6 +327,18 @@ fn push_ptp_string(buf: &mut Vec<u8>, s: &str) {
     }
     // null terminator
     buf.extend_from_slice(&0u16.to_le_bytes());
+}
+
+/// Appends a non-empty PTP u16 array to `buf`.
+///
+/// PTP array encoding (ptp-ptpip.md section 4.12): u32 LE count followed by
+/// `count` × u16 LE elements.
+// cancel-safe: synchronous — no .await points.
+fn push_u16_array(buf: &mut Vec<u8>, elements: &[u16]) {
+    buf.extend_from_slice(&(elements.len() as u32).to_le_bytes());
+    for &elem in elements {
+        buf.extend_from_slice(&elem.to_le_bytes());
+    }
 }
 
 /// Appends an empty PTP u16 array (count = 0, no elements).
@@ -465,5 +513,108 @@ mod tests {
             PtpIpPacket::OperationResponse { response_code, .. }
             if *response_code == response_code::OPERATION_NOT_SUPPORTED
         ));
+    }
+
+    /// Parses a PTP u16 array from a byte slice starting at `pos`.
+    ///
+    /// Format (ptp-ptpip.md section 4.12): u32 LE count, then count × u16 LE elements.
+    /// Returns (elements, new_pos) or panics on truncation.
+    fn parse_u16_array(buf: &[u8], pos: usize) -> (Vec<u16>, usize) {
+        let count = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        let mut elems = Vec::with_capacity(count);
+        let mut p = pos + 4;
+        for _ in 0..count {
+            elems.push(u16::from_le_bytes(buf[p..p + 2].try_into().unwrap()));
+            p += 2;
+        }
+        (elems, p)
+    }
+
+    /// Skips a PTP string in `buf` starting at `pos`.
+    ///
+    /// Format (ptp-ptpip.md section 4.11): u8 num_chars (incl. null), then num_chars × u16 LE.
+    /// Returns the position after the string.
+    fn skip_ptp_string(buf: &[u8], pos: usize) -> usize {
+        let num_chars = buf[pos] as usize;
+        pos + 1 + num_chars * 2
+    }
+
+    /// Verifies that the DeviceInfo binary payload produced by [`build_device_info_dataset`]
+    /// advertises the expected OperationsSupported and DevicePropertiesSupported arrays.
+    ///
+    /// The test decodes the PTP DeviceInfo binary (ISO 15740 §5.5.1) using the
+    /// field layout documented in `build_device_info_dataset`'s doc-comment, then
+    /// asserts that all session/property/object/thumb ops and the three session
+    /// properties appear in the respective arrays.
+    ///
+    /// References: ptp-ptpip.md sections 4.11, 4.12, 6.1; master-constants.md §2a, §3b.
+    #[test]
+    fn device_info_advertises_expected_operations_and_properties() {
+        use fuji_ptp::constants::prop_code;
+
+        let payload = build_device_info_dataset();
+        let buf = &payload[..];
+
+        // StandardVersion (u16) + VendorExtensionID (u32) + VendorExtensionVersion (u16) = 8 bytes
+        let mut pos = 8;
+        // VendorExtensionDesc (PTP string: "FUJIFILM")
+        pos = skip_ptp_string(buf, pos);
+        // FunctionalMode (u16)
+        pos += 2;
+        // OperationsSupported (u16 array)
+        let (ops, after_ops) = parse_u16_array(buf, pos);
+        pos = after_ops;
+        // EventsSupported (u16 array — empty)
+        let (events, after_events) = parse_u16_array(buf, pos);
+        pos = after_events;
+        // DevicePropertiesSupported (u16 array)
+        let (props, _after_props) = parse_u16_array(buf, pos);
+
+        // ── EventsSupported must be empty (Fujifilm uses EventsList poll) ──
+        assert!(
+            events.is_empty(),
+            "EventsSupported should be empty; got {:04X?}",
+            events
+        );
+
+        // ── OperationsSupported must contain all session-path opcodes ──
+        let required_ops: &[u16] = &[
+            opcode::GET_DEVICE_INFO,       // 0x1001
+            opcode::OPEN_SESSION,          // 0x1002
+            opcode::CLOSE_SESSION,         // 0x1003
+            opcode::GET_DEVICE_PROP_DESC,  // 0x1014
+            opcode::GET_DEVICE_PROP_VALUE, // 0x1015
+            opcode::SET_DEVICE_PROP_VALUE, // 0x1016
+            opcode::GET_OBJECT_INFO,       // 0x1008
+            opcode::GET_OBJECT,            // 0x1009
+            opcode::GET_THUMB,             // 0x100A
+            opcode::GET_PARTIAL_OBJECT,    // 0x101B
+        ];
+        for &code in required_ops {
+            assert!(
+                ops.contains(&code),
+                "OperationsSupported missing opcode 0x{:04X}; found: {:04X?}",
+                code,
+                ops
+            );
+        }
+
+        // ── DevicePropertiesSupported must contain the three session properties ──
+        let required_props: &[u16] = &[
+            prop_code::OBJECT_COUNT,             // 0xD222
+            prop_code::EVENTS_LIST,              // 0xD212
+            prop_code::IMAGE_GET_VERSION,        // 0xDF21
+            prop_code::CLIENT_STATE,             // 0xDF01
+            prop_code::CAMERA_STATE,             // 0xDF00
+            prop_code::ENABLE_CORRECT_FILE_SIZE, // 0xD227
+        ];
+        for &code in required_props {
+            assert!(
+                props.contains(&code),
+                "DevicePropertiesSupported missing prop_code 0x{:04X}; found: {:04X?}",
+                code,
+                props
+            );
+        }
     }
 }

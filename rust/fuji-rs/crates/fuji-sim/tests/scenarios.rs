@@ -732,7 +732,169 @@ async fn premature_disconnect() {
     handle.shutdown();
 }
 
-// ── Scenario 5: two_socket_event_handshake ────────────────────────────────────
+// ── Scenario 5: device_info_advertises_operations_and_properties ─────────────
+
+/// Parses a u16 PTP array at `offset` in `buf`.
+///
+/// PTP array encoding (ptp-ptpip.md section 4.12): u32 LE count + count × u16 LE.
+/// Returns `(array_elements, bytes_consumed)`.
+fn parse_u16_array(buf: &[u8], offset: usize) -> (Vec<u16>, usize) {
+    assert!(
+        buf.len() >= offset + 4,
+        "buffer too short to read u16-array count at offset {offset}"
+    );
+    let count = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+    let data_start = offset + 4;
+    let data_end = data_start + count * 2;
+    assert!(
+        buf.len() >= data_end,
+        "buffer too short for {count} u16 elements at offset {data_start}"
+    );
+    let mut elements = Vec::with_capacity(count);
+    for i in 0..count {
+        let pos = data_start + i * 2;
+        elements.push(u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap()));
+    }
+    (elements, 4 + count * 2)
+}
+
+/// Skips a PTP string in `buf` at `offset`, returning the number of bytes consumed.
+///
+/// PTP string encoding (ptp-ptpip.md section 4.11):
+///   u8 num_chars (including null; 0 = empty string), then num_chars × u16 LE.
+fn skip_ptp_string(buf: &[u8], offset: usize) -> usize {
+    assert!(
+        buf.len() > offset,
+        "buffer too short for PTP string length byte at offset {offset}"
+    );
+    let num_chars = buf[offset] as usize;
+    1 + num_chars * 2
+}
+
+/// Tests that GetDeviceInfo returns non-empty OperationsSupported and
+/// DevicePropertiesSupported arrays that contain specific expected codes.
+///
+/// Parses the ISO 15740 §5.5.1 DeviceInfo layout from the EndData payload:
+///   StandardVersion (u16)
+///   VendorExtensionID (u32)
+///   VendorExtensionVersion (u16)
+///   VendorExtensionDesc (PTP string)
+///   FunctionalMode (u16)
+///   OperationsSupported (u16 array)  ← assert non-empty, contains OPEN_SESSION
+///   EventsSupported (u16 array)      ← skip
+///   DevicePropertiesSupported (u16 array) ← assert non-empty, contains OBJECT_COUNT
+///
+/// Sources:
+///   - ptp-ptpip.md section 6.1 (GetDeviceInfo dataset layout). [H]
+///   - ptp-ptpip.md section 4.12 (array encoding). [H]
+///   - master-constants.md §2a (OPEN_SESSION = 0x1002). [H]
+///   - master-constants.md §3b (OBJECT_COUNT = 0xD222). [H]
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime, never used under tokio::select!
+#[tokio::test]
+async fn device_info_advertises_operations_and_properties() {
+    let config = FakeCameraBuilder::new().build();
+    let server = FakeCameraServer::bind(config).await.expect("bind");
+    let cmd_addr = server.bound_addr();
+    let event_addr = server.event_addr();
+    let handle = server.run();
+
+    let test_body = timeout(Duration::from_secs(5), async {
+        let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
+
+        let _ = handshake(&mut cmd_stream, &mut event_stream).await;
+
+        // OpenSession required before GetDeviceInfo returns a full payload.
+        // (GetDeviceInfo technically needs no session per spec, but the sim
+        // dispatch loop is already open here — we just follow the standard
+        // session flow for consistency with other scenarios.)
+        let open_resp =
+            op_no_data(&mut cmd_stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+        assert!(
+            matches!(&open_resp, PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK),
+            "OpenSession must return OK"
+        );
+
+        // ── GetDeviceInfo ─────────────────────────────────────────────────────
+        let (payload, code) =
+            op_data_read(&mut cmd_stream, opcode::GET_DEVICE_INFO, 1, vec![]).await;
+
+        assert_eq!(code, response_code::OK, "GetDeviceInfo must return OK");
+        assert!(!payload.is_empty(), "DeviceInfo payload must be non-empty");
+
+        // ── Parse DeviceInfo layout (ISO 15740 §5.5.1 / ptp-ptpip.md §6.1) ──
+        let mut cursor: usize = 0;
+
+        // StandardVersion: u16
+        cursor += 2;
+        // VendorExtensionID: u32
+        cursor += 4;
+        // VendorExtensionVersion: u16
+        cursor += 2;
+        // VendorExtensionDesc: PTP string ("FUJIFILM")
+        cursor += skip_ptp_string(&payload, cursor);
+        // FunctionalMode: u16
+        cursor += 2;
+
+        // OperationsSupported: u16 array — ptp-ptpip.md section 4.12.
+        let (ops, ops_consumed) = parse_u16_array(&payload, cursor);
+        cursor += ops_consumed;
+
+        assert!(
+            !ops.is_empty(),
+            "OperationsSupported must be non-empty (got empty array)"
+        );
+        assert!(
+            ops.contains(&opcode::OPEN_SESSION),
+            "OperationsSupported must contain OPEN_SESSION (0x{:04X}); got {ops:?}",
+            opcode::OPEN_SESSION
+        );
+        assert!(
+            ops.contains(&opcode::GET_DEVICE_INFO),
+            "OperationsSupported must contain GET_DEVICE_INFO (0x{:04X}); got {ops:?}",
+            opcode::GET_DEVICE_INFO
+        );
+        assert!(
+            ops.contains(&opcode::GET_PARTIAL_OBJECT),
+            "OperationsSupported must contain GET_PARTIAL_OBJECT (0x{:04X}); got {ops:?}",
+            opcode::GET_PARTIAL_OBJECT
+        );
+
+        // EventsSupported: u16 array — skip (Fujifilm uses EventsList poll instead).
+        let (_, events_consumed) = parse_u16_array(&payload, cursor);
+        cursor += events_consumed;
+
+        // DevicePropertiesSupported: u16 array — ptp-ptpip.md section 4.12.
+        let (props, _props_consumed) = parse_u16_array(&payload, cursor);
+
+        assert!(
+            !props.is_empty(),
+            "DevicePropertiesSupported must be non-empty (got empty array)"
+        );
+        assert!(
+            props.contains(&prop_code::OBJECT_COUNT),
+            "DevicePropertiesSupported must contain OBJECT_COUNT (0x{:04X}); got {props:?}",
+            prop_code::OBJECT_COUNT
+        );
+        assert!(
+            props.contains(&prop_code::EVENTS_LIST),
+            "DevicePropertiesSupported must contain EVENTS_LIST (0x{:04X}); got {props:?}",
+            prop_code::EVENTS_LIST
+        );
+
+        send_goodbye(&mut cmd_stream).await;
+        drop(cmd_stream);
+        drop(event_stream);
+    });
+
+    test_body
+        .await
+        .expect("device_info_advertises_operations_and_properties timed out");
+    handle.shutdown();
+}
+
+// ── Scenario 6: two_socket_event_handshake ────────────────────────────────────
 
 /// Validates the two-socket PTP-IP design explicitly:
 ///
