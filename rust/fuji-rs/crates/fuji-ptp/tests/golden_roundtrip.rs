@@ -170,6 +170,68 @@ fn golden_end_data() {
     assert_golden_roundtrip("end_data.hex", &bytes);
 }
 
+#[test]
+fn golden_init_fail() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/ptp/init_fail.hex"
+    ));
+    let bytes = parse_hex_fixture(raw);
+    assert_eq!(bytes.len(), 12, "init_fail.hex must be 12 bytes");
+    // Verify the packet_type bytes are 0x0005 (InitFail).
+    assert_eq!(bytes[4], 0x05, "init_fail.hex packet_type[0] must be 0x05");
+    assert_eq!(bytes[5], 0x00, "init_fail.hex packet_type[1] must be 0x00");
+    assert_golden_roundtrip("init_fail.hex", &bytes);
+}
+
+#[test]
+fn golden_cancel_transaction() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/ptp/cancel_transaction.hex"
+    ));
+    let bytes = parse_hex_fixture(raw);
+    assert_eq!(bytes.len(), 12, "cancel_transaction.hex must be 12 bytes");
+    // Verify the packet_type bytes are 0x000B (CancelTransaction).
+    assert_eq!(
+        bytes[4], 0x0B,
+        "cancel_transaction.hex packet_type[0] must be 0x0B"
+    );
+    assert_eq!(
+        bytes[5], 0x00,
+        "cancel_transaction.hex packet_type[1] must be 0x00"
+    );
+    assert_golden_roundtrip("cancel_transaction.hex", &bytes);
+}
+
+#[test]
+fn golden_ping() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/ptp/ping.hex"
+    ));
+    let bytes = parse_hex_fixture(raw);
+    assert_eq!(bytes.len(), 8, "ping.hex must be 8 bytes");
+    // Verify the packet_type bytes are 0x000D (Ping).
+    assert_eq!(bytes[4], 0x0D, "ping.hex packet_type[0] must be 0x0D");
+    assert_eq!(bytes[5], 0x00, "ping.hex packet_type[1] must be 0x00");
+    assert_golden_roundtrip("ping.hex", &bytes);
+}
+
+#[test]
+fn golden_pong() {
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/ptp/pong.hex"
+    ));
+    let bytes = parse_hex_fixture(raw);
+    assert_eq!(bytes.len(), 8, "pong.hex must be 8 bytes");
+    // Verify the packet_type bytes are 0x000E (Pong).
+    assert_eq!(bytes[4], 0x0E, "pong.hex packet_type[0] must be 0x0E");
+    assert_eq!(bytes[5], 0x00, "pong.hex packet_type[1] must be 0x00");
+    assert_golden_roundtrip("pong.hex", &bytes);
+}
+
 // ── Omnibus golden test (name contains "golden" per spec requirement) ─────────
 
 /// Runs all golden fixtures in sequence. The function name contains "golden"
@@ -263,6 +325,38 @@ fn golden_all_fixtures_roundtrip() {
                 "/tests/golden/ptp/end_data.hex"
             )),
             expected_len: 16,
+        },
+        Fixture {
+            name: "init_fail.hex",
+            content: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/golden/ptp/init_fail.hex"
+            )),
+            expected_len: 12,
+        },
+        Fixture {
+            name: "cancel_transaction.hex",
+            content: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/golden/ptp/cancel_transaction.hex"
+            )),
+            expected_len: 12,
+        },
+        Fixture {
+            name: "ping.hex",
+            content: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/golden/ptp/ping.hex"
+            )),
+            expected_len: 8,
+        },
+        Fixture {
+            name: "pong.hex",
+            content: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/golden/ptp/pong.hex"
+            )),
+            expected_len: 8,
         },
     ];
 

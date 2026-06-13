@@ -151,3 +151,61 @@ IMPORTANT: DataPacketEnd = 0x000C. Event is 0x0008 (a common off-by-one error).
 | 4–7 | u32 | `0C 00 00 00` | `packet_type` = 0x000C | §4.1: PTPIP_DATA_PACKET_END |
 | 8–11 | u32 | `01 00 00 00` | `transaction_id` = 1 | matching operation txn_id |
 | 12–15 | 4 B | `DE AD BE EF` | payload | invented placeholder final data chunk |
+
+---
+
+## init_fail.hex — 12 bytes, type 0x0005
+
+Source: ptp-ptpip.md §4.1 type table: PTPIP_INIT_FAIL = 0x0005.
+
+The standard does not define a fixed per-field layout for this type beyond the 8-byte header. The codec carries the raw trailing bytes as `raw_payload` so the packet round-trips correctly.
+
+The 4-byte raw_payload `DE AD BE EF` is an invented placeholder; it represents an opaque rejection reason. No bytes were copied from a real camera capture.
+
+| Byte offset | Width | Value (hex LE) | Field | Provenance |
+|---|---|---|---|---|
+| 0–3 | u32 | `0C 00 00 00` | `length` = 12 | §4.1 minimum header (8) + 4 payload bytes |
+| 4–7 | u32 | `05 00 00 00` | `packet_type` = 0x0005 | §4.1: PTPIP_INIT_FAIL |
+| 8–11 | 4 B | `DE AD BE EF` | `raw_payload` | invented placeholder rejection bytes |
+
+---
+
+## cancel_transaction.hex — 12 bytes, type 0x000B
+
+Source: ptp-ptpip.md §4.1 type table: PTPIP_CANCEL_TRANSACTION = 0x000B.
+
+The standard does not define a fixed per-field layout for this type beyond the 8-byte header. The codec carries the raw trailing bytes as `raw_payload`. The first 4 bytes, when present, typically encode the transaction ID being cancelled.
+
+The 4-byte raw_payload `CA AC EF 00` is invented (no real camera capture). `CA AC` is a distinctive invented marker; `EF 00` pads to a 4-byte LE value with no real-world meaning.
+
+| Byte offset | Width | Value (hex LE) | Field | Provenance |
+|---|---|---|---|---|
+| 0–3 | u32 | `0C 00 00 00` | `length` = 12 | §4.1 minimum header (8) + 4 payload bytes |
+| 4–7 | u32 | `0B 00 00 00` | `packet_type` = 0x000B | §4.1: PTPIP_CANCEL_TRANSACTION |
+| 8–11 | 4 B | `CA AC EF 00` | `raw_payload` | invented placeholder cancel payload |
+
+---
+
+## ping.hex — 8 bytes, type 0x000D
+
+Source: ptp-ptpip.md §4.1 type table: PTPIP_PING = 0x000D.
+
+The standard describes Ping as a keep-alive with no defined payload beyond the 8-byte header. The codec carries an empty `raw_payload`. This fixture tests the header-only minimal form.
+
+| Byte offset | Width | Value (hex LE) | Field | Provenance |
+|---|---|---|---|---|
+| 0–3 | u32 | `08 00 00 00` | `length` = 8 | §4.1 minimum valid packet: header only |
+| 4–7 | u32 | `0D 00 00 00` | `packet_type` = 0x000D | §4.1: PTPIP_PING |
+
+---
+
+## pong.hex — 8 bytes, type 0x000E
+
+Source: ptp-ptpip.md §4.1 type table: PTPIP_PONG = 0x000E.
+
+The standard describes Pong as the response to a Ping, with no defined payload beyond the 8-byte header. The codec carries an empty `raw_payload`. This fixture tests the header-only minimal form.
+
+| Byte offset | Width | Value (hex LE) | Field | Provenance |
+|---|---|---|---|---|
+| 0–3 | u32 | `08 00 00 00` | `length` = 8 | §4.1 minimum valid packet: header only |
+| 4–7 | u32 | `0E 00 00 00` | `packet_type` = 0x000E | §4.1: PTPIP_PONG |
