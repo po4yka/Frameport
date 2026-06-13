@@ -1,14 +1,17 @@
 //! `fuji-sim` — deterministic, hermetic in-process PTP-IP fake camera server.
 //!
-//! This crate provides a [`FakeCameraServer`] that binds on `127.0.0.1:0`
-//! (OS-assigned ephemeral port) and speaks the PTP-IP command-channel protocol
-//! over a real TCP loopback socket. It is the primary test harness used by all
-//! later Rust crates in the workspace.
+//! This crate provides a [`FakeCameraServer`] that binds TWO `TcpListener`s on
+//! `127.0.0.1:0` (OS-assigned ephemeral ports) and speaks the full PTP-IP
+//! two-socket protocol over real TCP loopback sockets. It is the primary test
+//! harness used by all later Rust crates in the workspace.
 //!
 //! # Design principles
 //!
-//! - **No fixed ports**: every test gets its own ephemeral port — no interference
-//!   between parallel test runners.
+//! - **Two-socket PTP-IP**: command channel (`bound_addr`) and event channel
+//!   (`event_addr`) are distinct listeners, matching production PTP-IP behaviour
+//!   (ptp-ptpip.md section 5.1 steps 5-7).
+//! - **No fixed ports**: every test gets its own ephemeral port pair — no
+//!   interference between parallel test runners.
 //! - **No thread::sleep**: timing is controlled by tokio's async executor.
 //! - **No global/static mutable state**: all server state is per-instance.
 //! - **Configurable behaviour**: BUSY count, fatal status codes, object count, and
@@ -23,9 +26,10 @@
 //! async fn example_session() {
 //!     let config = FakeCameraBuilder::new().object_count(3).build();
 //!     let server = FakeCameraServer::bind(config).await.unwrap();
-//!     let addr = server.bound_addr();
+//!     let cmd_addr   = server.bound_addr();
+//!     let event_addr = server.event_addr();
 //!     let handle = server.run();
-//!     // ... connect a test PTP-IP client to `addr` and exercise the session ...
+//!     // ... connect a test PTP-IP client to `cmd_addr` and `event_addr` ...
 //!     handle.shutdown();
 //! }
 //! ```
@@ -88,11 +92,11 @@ mod tests {
 
     // ── Smoke test: server binds, client connects, full handshake succeeds ────
 
-    /// Runs a minimal PTP-IP session:
-    ///   InitCommandRequest → InitCommandAck
-    ///   InitEventRequest → InitEventAck
-    ///   OpenSession → OK
-    ///   CloseSession → OK
+    /// Runs a minimal PTP-IP session using the two-socket design:
+    ///   [cmd]   InitCommandRequest → InitCommandAck
+    ///   [event] InitEventRequest → InitEventAck  (separate TCP connection)
+    ///   [cmd]   OpenSession → OK
+    ///   [cmd]   CloseSession → OK
     ///   (server shuts down)
     ///
     /// Uses no fixed ports, no thread::sleep, no global state.
@@ -109,10 +113,11 @@ mod tests {
 
         let config = FakeCameraBuilder::new().object_count(2).build();
         let srv = FakeCameraServer::bind(config).await.expect("bind");
-        let addr = srv.bound_addr();
+        let cmd_addr = srv.bound_addr();
+        let event_addr = srv.event_addr();
         let handle = srv.run();
 
-        // Helper: write a packet, read the next packet.
+        // Helper: write a packet, read the next packet on a given stream.
         // NOT cancel-safe: holds partial stream read state across .await; never used under tokio::select!.
         async fn exchange(stream: &mut TcpStream, send: &PtpIpPacket) -> PtpIpPacket {
             let bytes = encode_packet(send);
@@ -128,11 +133,10 @@ mod tests {
         }
 
         let session = timeout(Duration::from_secs(5), async {
-            let mut stream = TcpStream::connect(addr).await.expect("connect");
-
-            // Step 1: Init Command Request
+            // Step 1: command channel — InitCommandRequest → InitCommandAck
+            let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
             let ack = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::InitCommandRequest {
                     version: FUJI_PTPIP_VERSION,
                     guid: [0u8; 16],
@@ -145,9 +149,11 @@ mod tests {
                 "expected InitCommandAck, got {ack:?}"
             );
 
-            // Step 2: Init Event Request
+            // Step 2: event channel — InitEventRequest → InitEventAck (separate socket)
+            // ptp-ptpip.md section 5.1 steps 5-7. [H]
+            let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
             let event_ack = exchange(
-                &mut stream,
+                &mut event_stream,
                 &PtpIpPacket::InitEventRequest {
                     connection_number: 1,
                 },
@@ -157,7 +163,7 @@ mod tests {
 
             // Step 3: OpenSession (txn_id=0, param[0]=SESSION_ID=1)
             let open_resp = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::OperationRequest {
                     data_phase: 1,
                     opcode: opcode::OPEN_SESSION,
@@ -177,7 +183,7 @@ mod tests {
 
             // Step 4: CloseSession
             let close_resp = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::OperationRequest {
                     data_phase: 1,
                     opcode: opcode::CLOSE_SESSION,
@@ -218,7 +224,8 @@ mod tests {
 
         let config = FakeCameraBuilder::new().busy_count(1).build();
         let srv = FakeCameraServer::bind(config).await.expect("bind");
-        let addr = srv.bound_addr();
+        let cmd_addr = srv.bound_addr();
+        let event_addr = srv.event_addr();
         let handle = srv.run();
 
         // NOT cancel-safe: holds partial stream read state across .await; never used under tokio::select!.
@@ -235,11 +242,10 @@ mod tests {
         }
 
         let result = timeout(Duration::from_secs(5), async {
-            let mut stream = TcpStream::connect(addr).await.unwrap();
-
-            // Handshake
+            // Command channel handshake
+            let mut cmd_stream = TcpStream::connect(cmd_addr).await.unwrap();
             let _ = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::InitCommandRequest {
                     version: FUJI_PTPIP_VERSION,
                     guid: [1u8; 16],
@@ -247,15 +253,19 @@ mod tests {
                 },
             )
             .await;
+
+            // Event channel handshake — separate socket
+            let mut event_stream = TcpStream::connect(event_addr).await.unwrap();
             let _ = exchange(
-                &mut stream,
+                &mut event_stream,
                 &PtpIpPacket::InitEventRequest {
                     connection_number: 1,
                 },
             )
             .await;
+
             let _ = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::OperationRequest {
                     data_phase: 1,
                     opcode: opcode::OPEN_SESSION,
@@ -267,7 +277,7 @@ mod tests {
 
             // First SetDevicePropValue → BUSY (busy_count=1)
             let r1 = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::OperationRequest {
                     data_phase: 1,
                     opcode: opcode::SET_DEVICE_PROP_VALUE,
@@ -287,7 +297,7 @@ mod tests {
 
             // Second SetDevicePropValue → OK
             let r2 = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::OperationRequest {
                     data_phase: 1,
                     opcode: opcode::SET_DEVICE_PROP_VALUE,
@@ -307,7 +317,7 @@ mod tests {
 
             // CloseSession
             let _ = exchange(
-                &mut stream,
+                &mut cmd_stream,
                 &PtpIpPacket::OperationRequest {
                     data_phase: 1,
                     opcode: opcode::CLOSE_SESSION,

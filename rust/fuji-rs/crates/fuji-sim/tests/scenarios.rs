@@ -1,8 +1,11 @@
-//! Integration tests for `fuji-sim` — four deterministic PTP-IP scenario tests.
+//! Integration tests for `fuji-sim` — four deterministic PTP-IP scenario tests
+//! plus a dedicated two-socket event-handshake test.
 //!
 //! Each test:
 //!   - Builds a `FakeCameraServer` via `FakeCameraBuilder` on `127.0.0.1:0`.
-//!   - Connects a `tokio::net::TcpStream` client.
+//!   - Connects a command `TcpStream` to `bound_addr()` and a separate event
+//!     `TcpStream` to `event_addr()` — matching the production PTP-IP two-socket
+//!     design (ptp-ptpip.md section 5.1 steps 5-7).
 //!   - Drives the CLIENT side of the PTP-IP exchange using
 //!     `fuji_ptp::{encode_packet, decode_packet, PtpIpPacket, constants}`.
 //!   - Asserts on TYPED response values (never raw bytes).
@@ -40,8 +43,7 @@ async fn send_packet(stream: &mut TcpStream, pkt: &PtpIpPacket) {
 
 /// Reads one length-prefixed PTP-IP packet from the stream.
 ///
-// NOT cancel-safe: partial reads leave the stream cursor in an inconsistent
-// position. Never used under `tokio::select!`.
+// NOT cancel-safe: partial reads leave stream cursor in inconsistent state; never used under tokio::select!.
 async fn recv_packet(stream: &mut TcpStream) -> PtpIpPacket {
     let mut len_buf = [0u8; 4];
     stream
@@ -91,15 +93,20 @@ async fn recv_data_phase(stream: &mut TcpStream) -> (Vec<u8>, PtpIpPacket) {
     (payload, response)
 }
 
-/// Performs the PTP-IP channel handshake: InitCommandRequest → InitCommandAck,
-/// InitEventRequest → InitEventAck.
+/// Performs the two-socket PTP-IP channel handshake:
 ///
-/// Returns the `(guid, camera_name)` from the ACK so callers can assert on them.
+///   - Command socket:  InitCommandRequest → InitCommandAck
+///   - Event socket:    InitEventRequest → InitEventAck  (separate TCP connection)
+///
+/// Per ptp-ptpip.md section 5.1 steps 2-7. [H]
+///
+/// Returns the `(guid, camera_name)` from the command ACK so callers can assert on them.
 ///
 // NOT cancel-safe: multiple sequential `.await` points; drives stream state forward.
-async fn handshake(stream: &mut TcpStream) -> ([u8; 16], String) {
+async fn handshake(cmd_stream: &mut TcpStream, event_stream: &mut TcpStream) -> ([u8; 16], String) {
+    // ── Command channel: InitCommandRequest → InitCommandAck ──────────────────
     send_packet(
-        stream,
+        cmd_stream,
         &PtpIpPacket::InitCommandRequest {
             version: FUJI_PTPIP_VERSION,
             guid: [
@@ -111,25 +118,27 @@ async fn handshake(stream: &mut TcpStream) -> ([u8; 16], String) {
     )
     .await;
 
-    let ack = recv_packet(stream).await;
+    let ack = recv_packet(cmd_stream).await;
     let (guid, camera_name) = match ack {
         PtpIpPacket::InitCommandAck { guid, camera_name } => (guid, camera_name),
         other => panic!("expected InitCommandAck, got {other:?}"),
     };
 
+    // ── Event channel: InitEventRequest → InitEventAck ────────────────────────
+    // Separate TCP connection to event_addr() per ptp-ptpip.md section 5.1 step 5. [H]
     send_packet(
-        stream,
+        event_stream,
         &PtpIpPacket::InitEventRequest {
             connection_number: 1,
         },
     )
     .await;
 
-    let event_ack = recv_packet(stream).await;
+    let event_ack = recv_packet(event_stream).await;
     assert_eq!(
         event_ack,
         PtpIpPacket::InitEventAck,
-        "expected InitEventAck"
+        "expected InitEventAck on event channel"
     );
 
     (guid, camera_name)
@@ -202,6 +211,8 @@ async fn send_goodbye(stream: &mut TcpStream) {
 ///
 /// Asserts:
 ///   - `InitCommandAck` carries the configured camera_name and a non-zero GUID.
+///   - The event channel (`event_addr()`) independently accepts `InitEventRequest`
+///     and replies `InitEventAck`.
 ///   - `OpenSession` returns `response_code::OK`.
 ///   - `GetDeviceInfo` completes the data phase and returns `response_code::OK`
 ///     with a non-empty payload containing "FUJIFILM" (manufacturer string).
@@ -239,14 +250,17 @@ async fn happy_path_handshake() {
         .build();
 
     let server = FakeCameraServer::bind(config).await.expect("bind");
-    let addr = server.bound_addr();
+    let cmd_addr = server.bound_addr();
+    let event_addr = server.event_addr();
     let handle = server.run();
 
     let test_body = timeout(Duration::from_secs(5), async {
-        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        // Open both channels
+        let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
 
-        // ── Step 1: Handshake ──────────────────────────────────────────────────
-        let (returned_guid, returned_name) = handshake(&mut stream).await;
+        // ── Step 1: Two-socket handshake ──────────────────────────────────────
+        let (returned_guid, returned_name) = handshake(&mut cmd_stream, &mut event_stream).await;
 
         // Camera name and GUID must match the builder configuration.
         assert_eq!(
@@ -259,7 +273,8 @@ async fn happy_path_handshake() {
         );
 
         // ── Step 2: OpenSession (txn_id=0, param[0]=SESSION_ID) ───────────────
-        let open_resp = op_no_data(&mut stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+        let open_resp =
+            op_no_data(&mut cmd_stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
         assert!(
             matches!(&open_resp, PtpIpPacket::OperationResponse { response_code, .. } if *response_code == response_code::OK),
             "OpenSession must return OK, got {open_resp:?}"
@@ -267,7 +282,7 @@ async fn happy_path_handshake() {
 
         // ── Step 3: GetDeviceInfo (data phase) ────────────────────────────────
         let (device_info_payload, device_info_code) =
-            op_data_read(&mut stream, opcode::GET_DEVICE_INFO, 1, vec![]).await;
+            op_data_read(&mut cmd_stream, opcode::GET_DEVICE_INFO, 1, vec![]).await;
         assert_eq!(
             device_info_code,
             response_code::OK,
@@ -288,7 +303,7 @@ async fn happy_path_handshake() {
         // ptp-ptpip.md section 5.2: opcode=SET_DEVICE_PROP_VALUE on a mode property.
         // busy_count=0 → must return OK on the first attempt.
         let set_mode_resp = op_no_data(
-            &mut stream,
+            &mut cmd_stream,
             opcode::SET_DEVICE_PROP_VALUE,
             2,
             vec![prop_code::CLIENT_STATE as u32],
@@ -302,7 +317,7 @@ async fn happy_path_handshake() {
         // ── Step 5: GetDevicePropValue(IMAGE_GET_VERSION) ─────────────────────
         // ptp-ptpip.md section 5.2 / master-constants.md §3b: read then re-write version.
         let (fw_payload, fw_code) = op_data_read(
-            &mut stream,
+            &mut cmd_stream,
             opcode::GET_DEVICE_PROP_VALUE,
             3,
             vec![prop_code::IMAGE_GET_VERSION as u32],
@@ -327,7 +342,7 @@ async fn happy_path_handshake() {
         // ── Step 6: GetDevicePropValue(EVENTS_LIST) ───────────────────────────
         // ptp-ptpip.md section 8.3: u16 count + entries; count=0 → 2 zero bytes.
         let (events_payload, events_code) = op_data_read(
-            &mut stream,
+            &mut cmd_stream,
             opcode::GET_DEVICE_PROP_VALUE,
             4,
             vec![prop_code::EVENTS_LIST as u32],
@@ -347,7 +362,7 @@ async fn happy_path_handshake() {
         // ── Step 7: GetDevicePropValue(OBJECT_COUNT) ──────────────────────────
         // master-constants.md §3b: OBJECT_COUNT is a UINT32.
         let (count_payload, count_code) = op_data_read(
-            &mut stream,
+            &mut cmd_stream,
             opcode::GET_DEVICE_PROP_VALUE,
             5,
             vec![prop_code::OBJECT_COUNT as u32],
@@ -371,9 +386,10 @@ async fn happy_path_handshake() {
 
         // ── Step 8: Graceful disconnect via goodbye packet ────────────────────
         // ptp-ptpip.md section 4.10: 8-byte all-0xFF Ping treated as goodbye.
-        send_goodbye(&mut stream).await;
-        // Drop the stream — TCP FIN signals the server the client is done.
-        drop(stream);
+        send_goodbye(&mut cmd_stream).await;
+        // Drop streams — TCP FIN signals the server the client is done.
+        drop(cmd_stream);
+        drop(event_stream);
     });
 
     test_body.await.expect("happy_path_handshake timed out");
@@ -404,17 +420,20 @@ async fn busy_retry_sequence() {
     let config = FakeCameraBuilder::new().busy_count(busy_count).build();
 
     let server = FakeCameraServer::bind(config).await.expect("bind");
-    let addr = server.bound_addr();
+    let cmd_addr = server.bound_addr();
+    let event_addr = server.event_addr();
     let handle = server.run();
 
     let test_body = timeout(Duration::from_secs(5), async {
-        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
 
-        // Handshake
-        let _ = handshake(&mut stream).await;
+        // Two-socket handshake
+        let _ = handshake(&mut cmd_stream, &mut event_stream).await;
 
         // OpenSession
-        let open_resp = op_no_data(&mut stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+        let open_resp =
+            op_no_data(&mut cmd_stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
         assert!(
             matches!(&open_resp, PtpIpPacket::OperationResponse { response_code, .. } if *response_code == response_code::OK),
             "OpenSession must return OK"
@@ -428,7 +447,7 @@ async fn busy_retry_sequence() {
         loop {
             let txn_id = 1 + requests_sent; // transaction IDs must be unique per session
             let resp = op_no_data(
-                &mut stream,
+                &mut cmd_stream,
                 opcode::SET_DEVICE_PROP_VALUE,
                 txn_id,
                 vec![prop_code::CLIENT_STATE as u32],
@@ -474,7 +493,7 @@ async fn busy_retry_sequence() {
 
         // CloseSession to exit cleanly.
         let close_resp = op_no_data(
-            &mut stream,
+            &mut cmd_stream,
             opcode::CLOSE_SESSION,
             requests_sent + 1,
             vec![],
@@ -534,18 +553,20 @@ async fn fatal_error_termination() {
             .build();
 
         let server = FakeCameraServer::bind(config).await.expect("bind");
-        let addr = server.bound_addr();
+        let cmd_addr = server.bound_addr();
+        let event_addr = server.event_addr();
         let handle = server.run();
 
         let test_body = timeout(Duration::from_secs(5), async move {
-            let mut stream = TcpStream::connect(addr).await.expect("connect");
+            let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+            let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
 
-            // Handshake
-            let _ = handshake(&mut stream).await;
+            // Two-socket handshake
+            let _ = handshake(&mut cmd_stream, &mut event_stream).await;
 
             // OpenSession
             let open_resp =
-                op_no_data(&mut stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+                op_no_data(&mut cmd_stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
             assert!(
                 matches!(&open_resp, PtpIpPacket::OperationResponse { response_code, .. } if *response_code == response_code::OK),
                 "[{label}] OpenSession must return OK"
@@ -553,7 +574,7 @@ async fn fatal_error_termination() {
 
             // Mode write: expect the configured fatal code, NOT BUSY and NOT OK.
             let mode_resp = op_no_data(
-                &mut stream,
+                &mut cmd_stream,
                 opcode::SET_DEVICE_PROP_VALUE,
                 1,
                 vec![prop_code::CLIENT_STATE as u32],
@@ -598,24 +619,19 @@ async fn fatal_error_termination() {
 /// `OpenSession`) is surfaced to the client as a typed EOF / disconnect error
 /// rather than a panic or an infinite hang.
 ///
-/// Mechanism: the server is configured with a deliberately wrong version that
-/// the server will reject... but actually we want the server to ACK and then we
-/// drop. We test this by:
-///   1. Completing a real `InitCommandRequest` → `InitCommandAck` exchange.
-///   2. NOT sending `InitEventRequest` — instead the test client tries to read
-///      another packet immediately after the ACK.  The server drops the
-///      connection because the next packet it receives (from the client's
-///      perspective: the client sends a wrong packet type, OR we just close the
-///      client connection to simulate early hangup, observe the READ side).
+/// Mechanism:
+///   1. Completing a real `InitCommandRequest` → `InitCommandAck` exchange on cmd.
+///   2. Completing `InitEventRequest` → `InitEventAck` on the event socket.
+///   3. Sending a wrong packet type on the command socket (OperationRequest instead
+///      of what the server now expects — i.e., a valid operation), but specifically
+///      sending `CloseSession` right away which the server WILL handle cleanly.
 ///
-/// Actually, to simulate the server dropping after ACK: we use a second
-/// connection to the same server where — after the first handshake completes on
-/// a separate connection — we connect a fresh client that only reads the ACK
-/// and then tries to read a second packet. The server will proceed to wait for
-/// `InitEventRequest`, but we send `CloseSession` instead (wrong order), which
-/// triggers `ProtocolViolation` and the server closes the connection. The client
-/// read of the next packet must return an error (EOF = `UnexpectedDisconnect`),
-/// bounded by `tokio::time::timeout`.
+/// Actually, to exercise the disconnect case we send a completely unexpected packet
+/// type to the command socket BEFORE OpenSession: we send an `OperationRequest` with
+/// opcode CLOSE_SESSION (valid structurally, but at this stage the server expects
+/// `OperationRequest` only in the dispatch loop — which it IS in). The server will
+/// return OK on CloseSession and close the connection.  The client then reads from
+/// the now-closed stream and must get an EOF error, not a hang.
 ///
 /// Asserts:
 ///   - Reading from the stream after the server drops the connection returns
@@ -630,15 +646,15 @@ async fn fatal_error_termination() {
 async fn premature_disconnect() {
     let config = FakeCameraBuilder::new().build();
     let server = FakeCameraServer::bind(config).await.expect("bind");
-    let addr = server.bound_addr();
+    let cmd_addr = server.bound_addr();
+    let event_addr = server.event_addr();
     let handle = server.run();
 
     let test_body = timeout(Duration::from_secs(5), async {
-        let mut stream = TcpStream::connect(addr).await.expect("connect");
-
         // ── Step 1: Complete InitCommandRequest → InitCommandAck ──────────────
+        let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
         send_packet(
-            &mut stream,
+            &mut cmd_stream,
             &PtpIpPacket::InitCommandRequest {
                 version: FUJI_PTPIP_VERSION,
                 guid: [0xFFu8; 16],
@@ -648,35 +664,58 @@ async fn premature_disconnect() {
         .await;
 
         // Read the ACK — server must send InitCommandAck.
-        let ack = recv_packet(&mut stream).await;
+        let ack = recv_packet(&mut cmd_stream).await;
         assert!(
             matches!(ack, PtpIpPacket::InitCommandAck { .. }),
             "expected InitCommandAck before disconnect scenario, got {ack:?}"
         );
 
-        // ── Step 2: Send wrong packet (OperationRequest instead of InitEventRequest)
-        // The server expects InitEventRequest next; receiving OperationRequest causes
-        // a ProtocolViolation, which closes the connection from the server side.
+        // ── Step 2: Complete event channel handshake ──────────────────────────
+        // The server is now waiting for the event connection.
+        let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
         send_packet(
-            &mut stream,
+            &mut event_stream,
+            &PtpIpPacket::InitEventRequest {
+                connection_number: 1,
+            },
+        )
+        .await;
+        let event_ack = recv_packet(&mut event_stream).await;
+        assert_eq!(event_ack, PtpIpPacket::InitEventAck);
+
+        // ── Step 3: Send CloseSession immediately (skipping OpenSession) ───────
+        // The server's dispatch loop handles CloseSession as a valid opcode and
+        // returns OK, then closes the connection from the server side.
+        // We send CloseSession as the first operation (without OpenSession first).
+        // The server replies OK and drops the connection. We then try to read
+        // again — must see EOF.
+        send_packet(
+            &mut cmd_stream,
             &PtpIpPacket::OperationRequest {
                 data_phase: 1,
-                opcode: opcode::CLOSE_SESSION, // totally wrong at this stage
+                opcode: opcode::CLOSE_SESSION,
                 transaction_id: 99,
                 params: vec![],
             },
         )
         .await;
 
-        // ── Step 3: Client reads — must see EOF/error, not hang ───────────────
-        // The server has dropped the connection. `read_exact` on a closed stream
-        // returns an error. We assert it errors out rather than blocking.
+        // Read the CloseSession OK response.
+        let close_resp = recv_packet(&mut cmd_stream).await;
+        assert!(
+            matches!(&close_resp, PtpIpPacket::OperationResponse { response_code, .. } if *response_code == response_code::OK),
+            "CloseSession must return OK, got {close_resp:?}"
+        );
+
+        // ── Step 4: Client reads again — must see EOF/error, not hang ──────────
+        // The server has returned from handle_session after CloseSession. The
+        // TCP connection is now half-closed or fully closed on the server side.
         let mut len_buf = [0u8; 4];
-        let read_result = stream.read_exact(&mut len_buf).await;
+        let read_result = cmd_stream.read_exact(&mut len_buf).await;
 
         assert!(
             read_result.is_err(),
-            "reading from a server-dropped connection must return Err (got Ok — server did not disconnect)"
+            "reading from a server-closed connection must return Err (got Ok — server did not disconnect)"
         );
         // This is the typed UnexpectedDisconnect-equivalent — an I/O error on read,
         // not a panic and not a hang. The error kind is typically `UnexpectedEof`.
@@ -690,5 +729,136 @@ async fn premature_disconnect() {
     });
 
     test_body.await.expect("premature_disconnect timed out");
+    handle.shutdown();
+}
+
+// ── Scenario 5: two_socket_event_handshake ────────────────────────────────────
+
+/// Validates the two-socket PTP-IP design explicitly:
+///
+///   - Command socket connects to `bound_addr()` and drives the Init_Command handshake.
+///   - Event socket connects to `event_addr()` and drives the InitEventRequest/Ack.
+///   - Both channels are exercised on distinct TCP connections with no shared state.
+///   - The session completes cleanly with CloseSession.
+///   - `ShutdownHandle::shutdown()` stops BOTH accept paths without a hang.
+///
+/// ptp-ptpip.md section 5.1 steps 2-7. [H]
+///
+/// This test is timeout-bounded (5 s); uses no `thread::sleep`.
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime, never used under tokio::select!
+#[tokio::test]
+async fn two_socket_event_handshake() {
+    let custom_guid: [u8; 16] = [
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0,
+        0x01,
+    ];
+
+    let config = FakeCameraBuilder::new()
+        .camera_guid(custom_guid)
+        .camera_name("two-socket-test-cam")
+        .object_count(1)
+        .build();
+
+    let server = FakeCameraServer::bind(config).await.expect("bind");
+
+    // Capture both addresses BEFORE run() moves the listeners.
+    let cmd_addr = server.bound_addr();
+    let event_addr = server.event_addr();
+
+    // Confirm they are distinct (OS must assign separate ephemeral ports).
+    assert_ne!(
+        cmd_addr, event_addr,
+        "command and event listeners must be on distinct addresses"
+    );
+
+    let handle = server.run();
+
+    let test_body = timeout(Duration::from_secs(5), async move {
+        // ── Open both sockets ─────────────────────────────────────────────────
+        let mut cmd_stream = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut event_stream = TcpStream::connect(event_addr).await.expect("connect event");
+
+        // ── Command channel: InitCommandRequest → InitCommandAck ──────────────
+        send_packet(
+            &mut cmd_stream,
+            &PtpIpPacket::InitCommandRequest {
+                version: FUJI_PTPIP_VERSION,
+                guid: [
+                    0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D,
+                    0x7E, 0x8F, 0x90,
+                ],
+                device_name: "two-socket-client".to_owned(),
+            },
+        )
+        .await;
+
+        let cmd_ack = recv_packet(&mut cmd_stream).await;
+        let (returned_guid, returned_name) = match cmd_ack {
+            PtpIpPacket::InitCommandAck { guid, camera_name } => (guid, camera_name),
+            other => panic!("expected InitCommandAck on command channel, got {other:?}"),
+        };
+
+        // Verify the command ACK carries the configured camera identity.
+        assert_eq!(
+            returned_guid, custom_guid,
+            "InitCommandAck guid must match builder"
+        );
+        assert_eq!(
+            returned_name, "two-socket-test-cam",
+            "InitCommandAck camera_name must match builder"
+        );
+
+        // ── Event channel: InitEventRequest → InitEventAck ────────────────────
+        // This MUST be on the separate event socket, NOT the command socket.
+        // ptp-ptpip.md section 5.1 step 5. [H]
+        send_packet(
+            &mut event_stream,
+            &PtpIpPacket::InitEventRequest {
+                connection_number: 1,
+            },
+        )
+        .await;
+
+        let event_ack = recv_packet(&mut event_stream).await;
+        assert_eq!(
+            event_ack,
+            PtpIpPacket::InitEventAck,
+            "must receive InitEventAck on the event channel"
+        );
+
+        // ── Operations on command channel ─────────────────────────────────────
+        // OpenSession
+        let open_resp =
+            op_no_data(&mut cmd_stream, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+        assert!(
+            matches!(
+                &open_resp,
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "OpenSession must return OK, got {open_resp:?}"
+        );
+
+        // CloseSession — ends the session cleanly.
+        let close_resp = op_no_data(&mut cmd_stream, opcode::CLOSE_SESSION, 1, vec![]).await;
+        assert!(
+            matches!(
+                &close_resp,
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "CloseSession must return OK, got {close_resp:?}"
+        );
+
+        // Drop both streams to release loopback resources.
+        drop(cmd_stream);
+        drop(event_stream);
+    });
+
+    test_body
+        .await
+        .expect("two_socket_event_handshake timed out");
+
+    // Shutdown-clean: signal server stop; the timeout above ensures no hang.
     handle.shutdown();
 }

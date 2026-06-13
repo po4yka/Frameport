@@ -1,24 +1,29 @@
 //! [`FakeCameraServer`] — in-process PTP-IP fake camera server for tests.
 //!
-//! The server binds a `TcpListener` on `127.0.0.1:0` (OS-assigned port) and
-//! accepts exactly one command-channel connection per `run()` invocation.
+//! The server binds TWO `TcpListener`s on `127.0.0.1:0` (OS-assigned ports):
+//!
+//! * **Command channel** — accepts `InitCommandRequest` → replies `InitCommandAck`,
+//!   then drives the PTP operation dispatch loop.
+//! * **Event channel** — accepts `InitEventRequest` → replies `InitEventAck`.
+//!   This is a separate TCP connection, matching the production PTP-IP two-socket
+//!   design described in ptp-ptpip.md section 5.1 steps 5-7.
 //!
 //! # Lifecycle
 //!
 //! ```text
-//! let (server, handle) = FakeCameraServer::new(config).run().await?;
-//! let addr = server.bound_addr();   // pass to the test client
-//! // ... test client connects and runs the PTP-IP session ...
-//! handle.shutdown();                // signal the accept loop to stop
+//! let server = FakeCameraServer::bind(config).await?;
+//! let cmd_addr   = server.bound_addr();   // pass to the test command client
+//! let event_addr = server.event_addr();   // pass to the test event client
+//! let handle = server.run();
+//! // ... test client opens cmd_addr, does handshake, opens event_addr, etc. ...
+//! handle.shutdown();                      // signal the accept loop to stop
 //! ```
 //!
 //! # Protocol coverage
 //!
-//! The server handles the full PTP-IP command-channel session in lifecycle order:
-//!
-//! 1. InitCommandRequest → validate version == FUJI_PTPIP_VERSION → InitCommandAck
-//! 2. InitEventRequest → InitEventAck (no-op stub)
-//! 3. PTP operations dispatched by [`crate::dispatch`]
+//! 1. Command channel: InitCommandRequest → InitCommandAck
+//! 2. Event channel (separate TCP connection): InitEventRequest → InitEventAck
+//! 3. Command channel: PTP operations dispatched by [`crate::dispatch`]
 //! 4. Graceful shutdown on CloseSession or goodbye packet
 //!
 //! # Safety
@@ -64,41 +69,69 @@ impl ShutdownHandle {
 
 // ── FakeCameraServer ──────────────────────────────────────────────────────────
 
-/// In-process PTP-IP fake camera server.
+/// In-process PTP-IP fake camera server with two separate TCP listeners.
+///
+/// * `cmd_listener`   — command channel (use [`bound_addr`](Self::bound_addr))
+/// * `event_listener` — event channel   (use [`event_addr`](Self::event_addr))
 ///
 /// Create via [`FakeCameraBuilder`](crate::FakeCameraBuilder) and start with
 /// [`FakeCameraServer::run`].
 pub struct FakeCameraServer {
-    listener: TcpListener,
+    cmd_listener: TcpListener,
+    event_listener: TcpListener,
     config: ServerConfig,
 }
 
 impl FakeCameraServer {
-    /// Binds a new `TcpListener` on `127.0.0.1:0` (OS-assigned ephemeral port).
+    /// Binds two new `TcpListener`s on `127.0.0.1:0` (OS-assigned ephemeral ports):
+    /// one for the command channel and one for the event channel.
     ///
-    /// Never uses a fixed port — each test gets its own isolated server.
+    /// Never uses fixed ports — each test gets its own isolated server pair.
     ///
-    // cancel-safe: async bind completes without holding resources across .await.
+    // cancel-safe: async binds complete without holding resources across .await.
     pub async fn bind(config: ServerConfig) -> Result<Self, SimError> {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let cmd_listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(SimError::BindFailed)?;
-        Ok(Self { listener, config })
+        let event_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(SimError::BindFailed)?;
+        Ok(Self {
+            cmd_listener,
+            event_listener,
+            config,
+        })
     }
 
-    /// Returns the local address the server is bound to.
+    /// Returns the local address of the **command channel** listener.
     ///
-    /// Panics if the listener was somehow closed before this call (cannot happen
-    /// in normal usage since `bind()` holds the listener).
+    /// Panics if the listener was closed before this call (cannot happen in normal
+    /// usage since `bind()` holds the listener until `run()` moves it).
     pub fn bound_addr(&self) -> SocketAddr {
-        self.listener.local_addr().expect("listener has local_addr")
+        self.cmd_listener
+            .local_addr()
+            .expect("cmd_listener has local_addr")
+    }
+
+    /// Returns the local address of the **event channel** listener.
+    ///
+    /// The client must connect a separate TCP socket to this address and perform
+    /// the `InitEventRequest` → `InitEventAck` handshake (ptp-ptpip.md section 5.1
+    /// steps 5-7).
+    ///
+    /// Panics if the listener was closed before this call (cannot happen in normal usage).
+    pub fn event_addr(&self) -> SocketAddr {
+        self.event_listener
+            .local_addr()
+            .expect("event_listener has local_addr")
     }
 
     /// Starts the accept-and-dispatch loop in a background tokio task.
     ///
-    /// Returns a [`ShutdownHandle`] that the caller uses to stop the server.
-    /// The server accepts exactly one connection per call, services it fully,
-    /// then waits for the next connection or a shutdown signal.
+    /// Returns a [`ShutdownHandle`] that the caller uses to stop both listeners.
+    /// The server accepts one command connection and one event connection per session,
+    /// services the command connection fully, then waits for the next pair or a
+    /// shutdown signal.
     ///
     // cancel-safe: spawns a task; the task itself selects between accept and
     // the shutdown signal using tokio::select!. Each branch is cancel-safe
@@ -106,10 +139,11 @@ impl FakeCameraServer {
     pub fn run(self) -> ShutdownHandle {
         let (tx, rx) = oneshot::channel::<()>();
         let config = self.config;
-        let listener = self.listener;
+        let cmd_listener = self.cmd_listener;
+        let event_listener = self.event_listener;
 
         tokio::spawn(async move {
-            server_loop(listener, config, rx).await;
+            server_loop(cmd_listener, event_listener, config, rx).await;
         });
 
         ShutdownHandle { tx: Some(tx) }
@@ -118,17 +152,22 @@ impl FakeCameraServer {
 
 // ── Server loop ───────────────────────────────────────────────────────────────
 
-// cancel-safe: the outer select! arms are both cancel-safe. The
-// handle_connection future is NOT cancel-safe (it owns the TCP stream and
-// holds partial read state), but it is never dropped mid-flight in this loop —
+// The handle_session future is NOT cancel-safe (it owns TCP streams and holds
+// partial read state), but it is never dropped mid-flight in this loop —
 // once accepted we drive it to completion before looping.
+// cancel-safe: the outer select! arms are both cancel-safe.
 async fn server_loop(
-    listener: TcpListener,
+    cmd_listener: TcpListener,
+    event_listener: TcpListener,
     config: ServerConfig,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     loop {
-        tokio::select! {
+        // Accept the command connection. The event connection is accepted
+        // INSIDE handle_session after InitCommandAck is sent — this matches
+        // the production PTP-IP flow (ptp-ptpip.md section 5.1): the client
+        // connects the event socket only after receiving InitCommandAck.
+        let cmd_stream = tokio::select! {
             biased;
 
             // Shutdown signal wins if both are ready simultaneously.
@@ -136,33 +175,42 @@ async fn server_loop(
                 break;
             }
 
-            accept_result = listener.accept() => {
+            accept_result = cmd_listener.accept() => {
                 match accept_result {
-                    Ok((stream, _peer_addr)) => {
-                        // Drive the connection to completion before accepting another.
-                        // Errors are silently swallowed — the test will fail on its
-                        // own assertions if the server misbehaves.
-                        let _ = handle_connection(stream, &config).await;
-                    }
-                    Err(_) => {
-                        // Accept error: stop the loop (listener may be closed).
-                        break;
-                    }
+                    Ok((stream, _)) => stream,
+                    Err(_) => break,
                 }
             }
-        }
+        };
+
+        // Drive the full session. handle_session accepts the event connection
+        // from event_listener after sending InitCommandAck.
+        // The shutdown signal is not checked between command accept and session
+        // start — the session drives to completion (or protocol error) before
+        // the next loop iteration re-checks shutdown.
+        let _ = handle_session(cmd_stream, &event_listener, &config).await;
     }
 }
 
-// ── Per-connection handler ────────────────────────────────────────────────────
+// ── Per-session handler ───────────────────────────────────────────────────────
 
-// NOT cancel-safe: owns the TcpStream and holds accumulated read state.
-// Never driven via tokio::select! — always run to completion.
-async fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Result<(), SimError> {
+// Accepts the event-channel connection from `event_listener` AFTER sending
+// InitCommandAck on the command channel. This matches the production PTP-IP
+// flow (ptp-ptpip.md section 5.1): the client only opens the event socket after
+// it has received InitCommandAck. Never driven via tokio::select! — always run
+// to completion.
+// NOT cancel-safe: owns TcpStreams and holds accumulated read state.
+async fn handle_session(
+    mut cmd_stream: TcpStream,
+    event_listener: &TcpListener,
+    config: &ServerConfig,
+) -> Result<(), SimError> {
     let mut dispatch_state = DispatchState::new(config);
 
-    // Step 1: Init Command Request (section 5.1 step 2).
-    let pkt = read_packet(&mut stream).await?;
+    // ── Command channel handshake (section 5.1 steps 2-4) ────────────────────
+
+    // Step 1: Init Command Request.
+    let pkt = read_packet(&mut cmd_stream).await?;
     match pkt {
         PtpIpPacket::InitCommandRequest { version, .. } => {
             if version != FUJI_PTPIP_VERSION {
@@ -170,13 +218,13 @@ async fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Resu
                     "InitCommandRequest: expected version=0x{FUJI_PTPIP_VERSION:08X}, got 0x{version:08X}"
                 )));
             }
-            // Reply: InitCommandAck (GUID + camera_name only, no protocol-version field).
+            // Reply: InitCommandAck (GUID + camera_name only).
             // ptp-ptpip.md section 4.3. [H]
             let ack = PtpIpPacket::InitCommandAck {
                 guid: config.camera_guid,
                 camera_name: config.camera_name.clone(),
             };
-            write_packet(&mut stream, &ack).await?;
+            write_packet(&mut cmd_stream, &ack).await?;
         }
         other => {
             return Err(SimError::ProtocolViolation(format!(
@@ -185,24 +233,30 @@ async fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Resu
         }
     }
 
-    // Step 2: Init Event Request (section 5.1 steps 5-7).
-    // The server accepts this on the same command channel (test harness uses one
-    // connection; the event channel is lazy in production).
-    let pkt = read_packet(&mut stream).await?;
+    // ── Event channel handshake (section 5.1 steps 5-7) ─────────────────────
+    // After sending InitCommandAck, accept the client's event-channel connection.
+    // The client connects to event_addr() and sends InitEventRequest there;
+    // we reply with InitEventAck on that same connection.
+    let (mut event_stream, _) = event_listener
+        .accept()
+        .await
+        .map_err(SimError::AcceptFailed)?;
+
+    let pkt = read_packet(&mut event_stream).await?;
     match pkt {
         PtpIpPacket::InitEventRequest { .. } => {
-            write_packet(&mut stream, &PtpIpPacket::InitEventAck).await?;
+            write_packet(&mut event_stream, &PtpIpPacket::InitEventAck).await?;
         }
         other => {
             return Err(SimError::ProtocolViolation(format!(
-                "expected InitEventRequest, got {other:?}"
+                "expected InitEventRequest on event channel, got {other:?}"
             )));
         }
     }
 
-    // Step 3: Operation dispatch loop (section 5.1 steps 8-13).
+    // ── Operation dispatch loop (section 5.1 steps 8-13) ─────────────────────
     loop {
-        let pkt = read_packet(&mut stream).await?;
+        let pkt = read_packet(&mut cmd_stream).await?;
 
         match pkt {
             PtpIpPacket::OperationRequest {
@@ -216,7 +270,7 @@ async fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Resu
                 // before dispatching — the server does not use the data for any
                 // operation currently, but must drain them to keep the framing aligned.
                 let data_payload: Option<Vec<u8>> = if data_phase == 2 {
-                    let payload = read_data_phase(&mut stream).await?;
+                    let payload = read_data_phase(&mut cmd_stream).await?;
                     Some(payload)
                 } else {
                     None
@@ -234,7 +288,7 @@ async fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Resu
                 let is_close = op == opcode::CLOSE_SESSION;
 
                 for pkt in &response_pkts {
-                    write_packet(&mut stream, pkt).await?;
+                    write_packet(&mut cmd_stream, pkt).await?;
                 }
 
                 if is_close {
@@ -347,8 +401,8 @@ async fn read_packet(stream: &mut TcpStream) -> Result<PtpIpPacket, SimError> {
 
 /// Encodes `packet` and writes it to `stream` atomically.
 ///
+/// Never used under `tokio::select!`.
 // NOT cancel-safe: a partial write leaves the stream in an invalid state.
-// Never used under tokio::select!.
 async fn write_packet(stream: &mut TcpStream, packet: &PtpIpPacket) -> Result<(), SimError> {
     let bytes = encode_packet(packet);
     stream.write_all(&bytes).await.map_err(SimError::Io)
