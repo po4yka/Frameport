@@ -13,6 +13,7 @@
 //! | [`packet`] | [`PtpIpPacketType`] enum (all 14 codes) and [`PtpIpPacket`] enum |
 //! | [`string`] | PTP string and fixed 54-byte device-name helpers |
 //! | [`array`] | PTP u32 array encode/decode |
+//! | [`object_info`] | [`ObjectInfo`] struct + [`encode_object_info`] / [`decode_object_info`] |
 //! | [`framing`] | Fuji length-prefix frame (section 2) and Control Message (section 3) |
 //! | [`constants`] | Protocol constants: opcodes, response codes, prop codes, ports, magic |
 //!
@@ -40,6 +41,7 @@ pub mod constants;
 pub mod error;
 pub mod framing;
 pub mod header;
+pub mod object_info;
 pub mod packet;
 pub mod string;
 
@@ -51,6 +53,7 @@ pub use framing::{
     FujiControlMessage, FujiFrame, decode_control_message, decode_fuji_frame,
     encode_control_message, encode_fuji_frame,
 };
+pub use object_info::{ObjectInfo, decode_object_info, encode_object_info};
 pub use packet::{PtpIpPacket, PtpIpPacketType, decode_packet, encode_packet};
 pub use string::{
     DEVICE_NAME_FIELD_BYTES, decode_device_name, decode_ptp_string, encode_device_name,

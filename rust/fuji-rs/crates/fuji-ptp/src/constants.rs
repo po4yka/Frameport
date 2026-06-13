@@ -218,6 +218,11 @@ pub mod data_type {
 pub mod object_format {
     /// `0x3801` JPEG (standard).
     pub const JPEG: u16 = 0x3801;
+    /// `0x3808` JPEG (rotated / Exif-orientation variant).
+    ///
+    /// Some Fujifilm cameras report rotated JPEG objects with this format code.
+    /// It is treated identically to [`JPEG`] for import purposes.
+    pub const JPEG_ROTATED: u16 = 0x3808;
     /// `0xB103` RAF (Fujifilm RAW).
     pub const RAF: u16 = 0xB103;
     /// `0xB982` HEIF.
@@ -226,6 +231,9 @@ pub mod object_format {
     pub const MOV: u16 = 0x300D;
     /// `0xF802` Fujifilm RAW profile / object upload — use with opcode 0x900C.
     pub const FUJI_PROFILE: u16 = 0xF802;
+    // NOTE: There is no confirmed MP4 wire code in master-constants.md as of the
+    // current research corpus.  Do NOT add an Mp4 variant.  Unknown/MP4 codes map
+    // to fuji_core::CameraMediaFormat::Unknown { raw_code }.
 }
 
 // ── Session and connection constants ──────────────────────────────────────────

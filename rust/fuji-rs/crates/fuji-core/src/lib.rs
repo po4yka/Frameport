@@ -187,10 +187,17 @@ impl CameraMediaFormat {
     /// so the caller can log or inspect them without data loss.
     pub fn from_wire_code(code: u32) -> Self {
         match code {
+            // 0x3801 — standard JPEG (master-constants.md §2b, §4)
             0x3801 => Self::Jpeg,
+            // 0x3808 — JPEG/rotated variant (master-constants.md §4, section 4).
+            // Observed on some Fujifilm bodies; treated as JPEG for import purposes.
+            0x3808 => Self::Jpeg,
             0xB103 => Self::Raf,
             0xB982 => Self::Heif,
             0x300D => Self::Mov,
+            // NOTE: No confirmed MP4 wire code exists in master-constants.md as of M05.
+            // MP4 and any other unrecognised codes map to Unknown { raw_code }.
+            // Do NOT invent an Mp4 variant without a verified wire-code source.
             other => Self::Unknown {
                 raw_code: Some(other),
             },
@@ -475,7 +482,7 @@ pub enum ProtocolError {
     #[error("protocol:unexpected-packet")]
     UnexpectedPacket,
     #[error("protocol:invalid-packet-length")]
-    InvalidPacketLength,
+    InvalidPacketLength { declared: u32, minimum: u32 },
     #[error("protocol:invalid-transaction-id")]
     InvalidTransactionId,
     #[error("protocol:response-mismatch")]
@@ -578,7 +585,9 @@ pub enum TransferError {
     #[error("transfer:partial-read-failed")]
     PartialReadFailed,
     #[error("transfer:size-mismatch")]
-    SizeMismatch,
+    SizeMismatch { expected: u64, actual: u64 },
+    #[error("transfer:thumbnail-too-large")]
+    ThumbnailTooLarge { size: u64, limit: u64 },
     #[error("transfer:camera-disconnected")]
     CameraDisconnected,
     #[error("transfer:timeout")]
@@ -849,7 +858,10 @@ mod tests {
             "ProtocolError::UnexpectedPacket"
         );
         check_variant!(
-            ProtocolError::InvalidPacketLength,
+            ProtocolError::InvalidPacketLength {
+                declared: 4,
+                minimum: 12
+            },
             "ProtocolError::InvalidPacketLength"
         );
         check_variant!(
@@ -980,7 +992,7 @@ mod tests {
         );
     }
 
-    // TransferError — all 8 variants
+    // TransferError — all 9 variants (SizeMismatch and ThumbnailTooLarge are struct variants)
     #[test]
     fn redaction_transfer_error() {
         check_variant!(
@@ -991,7 +1003,20 @@ mod tests {
             TransferError::PartialReadFailed,
             "TransferError::PartialReadFailed"
         );
-        check_variant!(TransferError::SizeMismatch, "TransferError::SizeMismatch");
+        check_variant!(
+            TransferError::SizeMismatch {
+                expected: 1024,
+                actual: 512
+            },
+            "TransferError::SizeMismatch"
+        );
+        check_variant!(
+            TransferError::ThumbnailTooLarge {
+                size: 600_000,
+                limit: 524_288
+            },
+            "TransferError::ThumbnailTooLarge"
+        );
         check_variant!(
             TransferError::CameraDisconnected,
             "TransferError::CameraDisconnected"

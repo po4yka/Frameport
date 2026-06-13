@@ -155,6 +155,7 @@ name = "fuji-ptpip"
 version = "0.1.0"
 dependencies = [
  "fuji-core",
+ "fuji-ptp",
 ]
 
 [[package]]
@@ -172,6 +173,11 @@ name = "fuji-transfer"
 version = "0.1.0"
 dependencies = [
  "fuji-core",
+ "fuji-ptp",
+ "fuji-ptpip",
+ "fuji-sim",
+ "libc",
+ "tokio",
 ]
 
 [[package]]

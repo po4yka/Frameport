@@ -23,6 +23,10 @@
 //!
 //! 1. Command channel: InitCommandRequest → InitCommandAck
 //! 2. Event channel (separate TCP connection): InitEventRequest → InitEventAck
+//!    The event channel is handled **concurrently** with the dispatch loop — a
+//!    background task accepts and services it opportunistically.  This matches the
+//!    production protocol where the event channel is lazy (opened only after
+//!    InitiateOpenCapture, never required before the transfer handshake).
 //! 3. Command channel: PTP operations dispatched by [`crate::dispatch`]
 //! 4. Graceful shutdown on CloseSession or goodbye packet
 //!
@@ -31,6 +35,7 @@
 //! This module is `#![forbid(unsafe_code)]` (enforced at the crate root).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -40,8 +45,19 @@ use fuji_ptp::constants::{FUJI_PTPIP_VERSION, opcode};
 use fuji_ptp::{PtpIpPacket, decode_packet, encode_packet};
 
 use crate::builder::ServerConfig;
-use crate::dispatch::{DispatchState, dispatch_operation};
+use crate::dispatch::{DispatchResult, DispatchState, dispatch_operation};
 use crate::error::SimError;
+
+// PTP-IP packet type codes for the raw streaming frame headers.
+// type=0x09 → StartData, type=0x0C → EndData.
+// Source: ptp-ptpip.md section 4.1 / packet type code table. [H]
+const PTPIP_TYPE_START_DATA: u32 = 0x0000_0009;
+const PTPIP_TYPE_END_DATA: u32 = 0x0000_000C;
+const PTPIP_TYPE_OPERATION_RESPONSE: u32 = 0x0000_0007;
+
+// response_code::OK = 0x2001 — used in the raw OperationResponse frame after streaming.
+// fuji_ptp::constants::response_code::OK
+const RESPONSE_CODE_OK: u16 = 0x2001;
 
 // ── ShutdownHandle ────────────────────────────────────────────────────────────
 
@@ -129,9 +145,12 @@ impl FakeCameraServer {
     /// Starts the accept-and-dispatch loop in a background tokio task.
     ///
     /// Returns a [`ShutdownHandle`] that the caller uses to stop both listeners.
-    /// The server accepts one command connection and one event connection per session,
-    /// services the command connection fully, then waits for the next pair or a
-    /// shutdown signal.
+    /// The server accepts one command connection per session and services it fully,
+    /// then waits for the next connection or a shutdown signal.
+    ///
+    /// The event channel listener is wrapped in an `Arc<TcpListener>` so that per-session
+    /// background tasks can accept event connections concurrently with the command dispatch
+    /// loop, without blocking it.
     ///
     // cancel-safe: spawns a task; the task itself selects between accept and
     // the shutdown signal using tokio::select!. Each branch is cancel-safe
@@ -140,7 +159,8 @@ impl FakeCameraServer {
         let (tx, rx) = oneshot::channel::<()>();
         let config = self.config;
         let cmd_listener = self.cmd_listener;
-        let event_listener = self.event_listener;
+        // Wrap event_listener in Arc so background per-session tasks can share it.
+        let event_listener = Arc::new(self.event_listener);
 
         tokio::spawn(async move {
             server_loop(cmd_listener, event_listener, config, rx).await;
@@ -158,15 +178,14 @@ impl FakeCameraServer {
 // cancel-safe: the outer select! arms are both cancel-safe.
 async fn server_loop(
     cmd_listener: TcpListener,
-    event_listener: TcpListener,
+    event_listener: Arc<TcpListener>,
     config: ServerConfig,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     loop {
-        // Accept the command connection. The event connection is accepted
-        // INSIDE handle_session after InitCommandAck is sent — this matches
-        // the production PTP-IP flow (ptp-ptpip.md section 5.1): the client
-        // connects the event socket only after receiving InitCommandAck.
+        // Accept the command connection only. The event connection is accepted
+        // concurrently by a background task spawned inside handle_session, so
+        // the dispatch loop never blocks waiting for the event channel.
         let cmd_stream = tokio::select! {
             biased;
 
@@ -183,26 +202,32 @@ async fn server_loop(
             }
         };
 
-        // Drive the full session. handle_session accepts the event connection
-        // from event_listener after sending InitCommandAck.
+        // Drive the full session. handle_session spawns a background task for
+        // the event channel and proceeds directly to the dispatch loop.
         // The shutdown signal is not checked between command accept and session
         // start — the session drives to completion (or protocol error) before
         // the next loop iteration re-checks shutdown.
-        let _ = handle_session(cmd_stream, &event_listener, &config).await;
+        let _ = handle_session(cmd_stream, Arc::clone(&event_listener), &config).await;
     }
 }
 
 // ── Per-session handler ───────────────────────────────────────────────────────
 
-// Accepts the event-channel connection from `event_listener` AFTER sending
-// InitCommandAck on the command channel. This matches the production PTP-IP
-// flow (ptp-ptpip.md section 5.1): the client only opens the event socket after
-// it has received InitCommandAck. Never driven via tokio::select! — always run
-// to completion.
+// Sends InitCommandAck on the command channel, then immediately spawns a
+// background task to accept and service the event channel concurrently.
+// The dispatch loop starts without waiting for the event channel — this is
+// correct per docs/reference/transfer-liveview.md section 1: the event channel
+// is lazy and is never required before the transfer handshake.
+//
+// The background event task accepts ONE event connection, performs
+// InitEventRequest → InitEventAck, and then exits.  It simply pends forever if
+// no event client connects; it is dropped when the session ends.
+//
+// Never driven via tokio::select! — always run to completion.
 // NOT cancel-safe: owns TcpStreams and holds accumulated read state.
 async fn handle_session(
     mut cmd_stream: TcpStream,
-    event_listener: &TcpListener,
+    event_listener: Arc<TcpListener>,
     config: &ServerConfig,
 ) -> Result<(), SimError> {
     let mut dispatch_state = DispatchState::new(config);
@@ -233,26 +258,26 @@ async fn handle_session(
         }
     }
 
-    // ── Event channel handshake (section 5.1 steps 5-7) ─────────────────────
-    // After sending InitCommandAck, accept the client's event-channel connection.
-    // The client connects to event_addr() and sends InitEventRequest there;
-    // we reply with InitEventAck on that same connection.
-    let (mut event_stream, _) = event_listener
-        .accept()
-        .await
-        .map_err(SimError::AcceptFailed)?;
-
-    let pkt = read_packet(&mut event_stream).await?;
-    match pkt {
-        PtpIpPacket::InitEventRequest { .. } => {
-            write_packet(&mut event_stream, &PtpIpPacket::InitEventAck).await?;
+    // ── Event channel: spawn concurrent background task (section 5.1 steps 5-7) ──
+    // After sending InitCommandAck the client MAY connect the event channel.
+    // We accept it opportunistically in a background task so the dispatch loop
+    // below is NEVER blocked waiting for it.  If no client connects the task
+    // simply pends until it is dropped at the end of this session.
+    //
+    // cancel-safe annotation for the spawned task: the task owns its own
+    // TcpStream and drives it to completion; it is never cancelled mid-frame.
+    tokio::spawn(async move {
+        if let Ok((mut event_stream, _)) = event_listener.accept().await {
+            // Read InitEventRequest and reply InitEventAck.
+            // Ignore errors — the background task is best-effort.
+            if let Ok(pkt) = read_packet(&mut event_stream).await
+                && matches!(pkt, PtpIpPacket::InitEventRequest { .. })
+            {
+                let _ = write_packet(&mut event_stream, &PtpIpPacket::InitEventAck).await;
+            }
         }
-        other => {
-            return Err(SimError::ProtocolViolation(format!(
-                "expected InitEventRequest on event channel, got {other:?}"
-            )));
-        }
-    }
+        // event_stream is dropped here, closing the event TCP connection.
+    });
 
     // ── Operation dispatch loop (section 5.1 steps 8-13) ─────────────────────
     loop {
@@ -276,7 +301,7 @@ async fn handle_session(
                     None
                 };
 
-                let response_pkts = dispatch_operation(
+                let dispatch_result = dispatch_operation(
                     op,
                     transaction_id,
                     &params,
@@ -287,8 +312,105 @@ async fn handle_session(
 
                 let is_close = op == opcode::CLOSE_SESSION;
 
-                for pkt in &response_pkts {
-                    write_packet(&mut cmd_stream, pkt).await?;
+                match dispatch_result {
+                    DispatchResult::Packets(pkts) => {
+                        for pkt in &pkts {
+                            write_packet(&mut cmd_stream, pkt).await?;
+                        }
+                    }
+                    DispatchResult::StreamObject {
+                        transaction_id: txn_id,
+                        total_data_length,
+                        object_bytes,
+                        reset_after_bytes,
+                    } => {
+                        // Write StartData frame (20 bytes):
+                        //   length  u32 LE = 20
+                        //   type    u32 LE = 0x09
+                        //   txn_id  u32 LE
+                        //   total_data_length u64 LE
+                        // ptp-ptpip.md section 4.9 / wire-format ground truth. [H]
+                        let mut start_data = [0u8; 20];
+                        start_data[0..4].copy_from_slice(&20u32.to_le_bytes());
+                        start_data[4..8].copy_from_slice(&PTPIP_TYPE_START_DATA.to_le_bytes());
+                        start_data[8..12].copy_from_slice(&txn_id.to_le_bytes());
+                        start_data[12..20].copy_from_slice(&total_data_length.to_le_bytes());
+                        cmd_stream
+                            .write_all(&start_data)
+                            .await
+                            .map_err(SimError::Io)?;
+
+                        // Write EndData frame header:
+                        //   length  u32 LE = 12 + object_bytes.len()
+                        //   type    u32 LE = 0x0C
+                        //   txn_id  u32 LE
+                        // Then stream the body in 64 KiB chunks (no per-iteration heap alloc —
+                        // one [u8; 65536] stack buffer is reused per the streaming requirement).
+                        let body_len = object_bytes.len();
+                        let end_data_header_len: u32 = 12 + body_len as u32;
+                        let mut end_data_header = [0u8; 12];
+                        end_data_header[0..4].copy_from_slice(&end_data_header_len.to_le_bytes());
+                        end_data_header[4..8].copy_from_slice(&PTPIP_TYPE_END_DATA.to_le_bytes());
+                        end_data_header[8..12].copy_from_slice(&txn_id.to_le_bytes());
+                        cmd_stream
+                            .write_all(&end_data_header)
+                            .await
+                            .map_err(SimError::Io)?;
+
+                        // Stream body bytes, honouring the connection-reset fault.
+                        // One stack buffer reused across all iterations (no per-chunk alloc).
+                        const CHUNK: usize = 65536;
+                        let mut buf = [0u8; CHUNK];
+                        let mut written: usize = 0;
+                        loop {
+                            if written >= body_len {
+                                break;
+                            }
+                            let remaining = body_len - written;
+                            let to_write = remaining.min(CHUNK);
+
+                            // Connection-reset fault: drop after `k` bytes of body.
+                            if let Some(k) = reset_after_bytes {
+                                if written >= k {
+                                    // Drop the connection mid-stream.
+                                    return Ok(());
+                                }
+                                // Clamp the chunk so we stop exactly at k.
+                                let clamped = to_write.min(k.saturating_sub(written));
+                                buf[..clamped]
+                                    .copy_from_slice(&object_bytes[written..written + clamped]);
+                                cmd_stream
+                                    .write_all(&buf[..clamped])
+                                    .await
+                                    .map_err(SimError::Io)?;
+                                written += clamped;
+                                continue;
+                            }
+
+                            buf[..to_write]
+                                .copy_from_slice(&object_bytes[written..written + to_write]);
+                            cmd_stream
+                                .write_all(&buf[..to_write])
+                                .await
+                                .map_err(SimError::Io)?;
+                            written += to_write;
+                        }
+
+                        // Write OperationResponse(OK) after the stream.
+                        // Wire format (ptp-ptpip.md section 4.7):
+                        //   length        u32 LE = 18 (no result_params)
+                        //   type          u32 LE = 0x07
+                        //   response_code u16 LE = 0x2001 (OK)
+                        //   transaction_id u32 LE
+                        // (result_params are absent when empty — length stays 18)
+                        let mut op_resp = [0u8; 18];
+                        op_resp[0..4].copy_from_slice(&18u32.to_le_bytes());
+                        op_resp[4..8].copy_from_slice(&PTPIP_TYPE_OPERATION_RESPONSE.to_le_bytes());
+                        op_resp[8..10].copy_from_slice(&RESPONSE_CODE_OK.to_le_bytes());
+                        op_resp[10..14].copy_from_slice(&txn_id.to_le_bytes());
+                        // bytes 14..18 = 4 padding bytes (zero) — standard empty result_params
+                        cmd_stream.write_all(&op_resp).await.map_err(SimError::Io)?;
+                    }
                 }
 
                 if is_close {
