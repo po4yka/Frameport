@@ -58,7 +58,7 @@ Do not use this file as marketing copy. It is an engineering and support documen
 
 | Camera | Firmware | BLE Scan | BLE Connect | BLE Handoff | Manual Wi-Fi | PTP-IP Session | Object List | Thumbnail | JPEG Import | HEIF Import | RAF Import | Remote Shutter | Live View | USB | Status | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Fujifilm X-T5 | Unknown / unverified | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Unknown | Primary first-run target. No hardware testing has been performed yet. Every feature column must be verified independently on real hardware before any status is upgraded from Unknown. Firmware version must be recorded at time of first test. |
+| Fujifilm X-T5 | Unknown / unverified | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Experimental | Unknown | Out of scope | Unknown | Primary first-run target. No hardware testing has been performed yet. Every feature column must be verified independently on real hardware before any status is upgraded from Unknown. Firmware version must be recorded at time of first test. Remote Shutter is Experimental, not Supported: M15 implemented the BLE and PTP-IP remote-shutter paths, verified by the fuji-sim RemoteScenario and JVM unit tests only — not yet confirmed against real hardware. |
 | Other Fujifilm X/GFX cameras | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Out of scope | Unknown | Do not claim support until tested on real hardware. |
 
 ## Android Reference Devices

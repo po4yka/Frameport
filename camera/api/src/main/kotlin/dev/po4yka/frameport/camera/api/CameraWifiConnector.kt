@@ -27,6 +27,34 @@ interface CameraWifiConnector {
 
     // cancel-safe: idempotent cleanup; second call is a no-op; no suspension points after state transition.
     suspend fun release(handle: CameraNetworkHandle)
+
+    /**
+     * Open, bind, and connect a second TCP socket to the PTP-IP event channel endpoint,
+     * then hand off the duplicated fd to the caller for passing to the Rust layer.
+     *
+     * The event channel (port [EVENT_CHANNEL_PORT] = 55741, master-constants.md §1) is
+     * opened LAZILY — only after InitiateOpenCapture (0x101C) triggers the camera to
+     * start listening on that port.
+     *
+     * fd ownership contract (identical to [openBoundSocket] / M07 command-channel pattern):
+     * The returned [OwnedSocketHandle.fd] is a dup of the underlying socket fd.
+     * Ownership transfers to the CALLER (Rust layer). The Android side has already
+     * closed its own socket reference separately. Rust closes its dup when done.
+     * See docs/rust/fd-ownership.md and ADR-0002.
+     *
+     * TCP socket config: TCP_NODELAY = true, SO_KEEPALIVE = true, 1 s connect timeout.
+     * Source: master-constants.md §1. [H] FCW, LFJ, FJH, XPN, XBL
+     *
+     * State transitions emitted during this call:
+     *   [CameraWifiState.EventSocketRequested] → [CameraWifiState.EventSocketBound]
+     *   → [CameraWifiState.EventSocketHandedOff] on success
+     *   → [CameraWifiState.Error] on failure
+     *
+     * @param handle An active [CameraNetworkHandle] (same handle used for the command channel).
+     * @return [Result.success] with the owned, dup'd fd; [Result.failure] with a typed [CameraWifiError].
+     */
+    // cancel-safe: socket creation and connect are synchronous within withContext; cancellation closes the scope cleanly.
+    suspend fun openEventSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle>
 }
 
 /**
@@ -60,6 +88,35 @@ sealed class CameraWifiState {
     data class Error(
         val cause: CameraWifiError,
     ) : CameraWifiState()
+
+    // ── Event-channel socket states (M15 remote capture) ─────────────────────
+    // Emitted by [CameraWifiConnector.openEventSocket] during the lazy event-channel
+    // handoff. These run AFTER [Connected] and do not replace the command-channel state.
+
+    /**
+     * Android is creating and binding a socket for the PTP-IP event channel
+     * (port EVENT_CHANNEL_PORT = 55741, master-constants.md §1).
+     * Only emitted after InitiateOpenCapture triggers the camera to open that port.
+     */
+    data object EventSocketRequested : CameraWifiState()
+
+    /**
+     * Event-channel socket is bound to the camera network and connected to the
+     * camera endpoint; fd is about to be dup'd for handoff.
+     */
+    data object EventSocketBound : CameraWifiState()
+
+    /**
+     * Dup'd event-channel fd has been handed to the caller ([OwnedSocketHandle]).
+     * Ownership has transferred; the Rust EventChannelReader now owns the fd.
+     */
+    data object EventSocketHandedOff : CameraWifiState()
+
+    /**
+     * Event-channel socket was released (session ended or error recovery).
+     * Transitions back to [Connected] if the command channel is still active.
+     */
+    data object EventSocketReleased : CameraWifiState()
 }
 
 /**

@@ -61,6 +61,9 @@ class CameraWifiConnectorImpl
             /** Command/control channel TCP port (0xD9BC). [H] FCW, LFJ, FJH, XPN, XBL — master-constants §1 */
             const val COMMAND_PORT = 55740
 
+            /** Event channel TCP port (0xD9BD). [H] FCW, LFJ, FJH, XPN, XBL — master-constants §1 */
+            const val EVENT_CHANNEL_PORT = 55741
+
             /** Non-blocking connect timeout in milliseconds. [H] FJH, LFJ, XPN — master-constants §1 */
             const val CONNECT_TIMEOUT_MS = 1000
 
@@ -257,6 +260,94 @@ class CameraWifiConnectorImpl
 
                 _state.value = CameraWifiState.Connected
                 Timber.tag(TAG).d("openBoundSocket: Connected, fd=%d", ownedFd)
+
+                Result.success(OwnedSocketHandle(ownedFd))
+            }
+
+        // cancel-safe: socket creation and connect are synchronous within withContext; cancellation closes the scope cleanly.
+        override suspend fun openEventSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle> =
+            withContext(ioDispatcher) {
+                // The event channel is opened LAZILY — only after InitiateOpenCapture (0x101C) causes
+                // the camera to start listening on EVENT_CHANNEL_PORT. Do NOT open this socket eagerly.
+                //
+                // EVENT_CHANNEL_PORT = 55741 (0xD9BD). [H] FCW, LFJ, FJH, XPN, XBL — master-constants §1
+                // Socket config: TCP_NODELAY=true, SO_KEEPALIVE=true, 1 s connect timeout (same as command channel).
+                val eventEndpoint =
+                    CameraEndpoint(
+                        host = CAMERA_AP_IP,
+                        port = EVENT_CHANNEL_PORT,
+                    )
+
+                _state.value = CameraWifiState.EventSocketRequested
+                Timber
+                    .tag(
+                        TAG,
+                    ).d("openEventSocket: EventSocketRequested -> %s:%d", eventEndpoint.host, eventEndpoint.port)
+
+                val network = findNetwork(handle)
+                if (network == null) {
+                    val detail = "No active Network matching handle; network may have been lost"
+                    _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
+                    return@withContext Result.failure(IllegalStateException(detail))
+                }
+
+                val socket = Socket()
+                try {
+                    network.bindSocket(socket)
+                } catch (e: Exception) {
+                    val detail = "event-socket bindSocket failed: ${e.javaClass.simpleName}"
+                    Timber.tag(TAG).d("openEventSocket: SocketBindFailed (%s)", detail)
+                    _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
+                    socket.close()
+                    return@withContext Result.failure(e)
+                }
+
+                _state.value = CameraWifiState.EventSocketBound
+                Timber.tag(TAG).d("openEventSocket: EventSocketBound")
+
+                try {
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    socket.connect(InetSocketAddress(eventEndpoint.host, eventEndpoint.port), CONNECT_TIMEOUT_MS)
+                } catch (e: Exception) {
+                    val detail = "event-socket connect failed: ${e.javaClass.simpleName}"
+                    Timber.tag(TAG).d("openEventSocket: SocketConnectFailed (%s)", detail)
+                    _state.value = CameraWifiState.Error(CameraWifiError.SocketConnectFailed(detail))
+                    socket.close()
+                    return@withContext Result.failure(e)
+                }
+
+                // DUP AND OWN (identical discipline to openBoundSocket — M07 command-channel pattern):
+                // ParcelFileDescriptor.fromSocket(socket) wraps the socket's fd; detachFd() creates
+                // an independent owned duplicate transferred to the caller (Rust EventChannelReader).
+                // Android must NOT close this fd; Rust owns it exclusively and closes it via JNI bridge.
+                // The underlying 'socket' object is closed below — Android does NOT retain the event socket
+                // because the event channel does not keep the Network binding alive (the command channel
+                // socket in activeSocket already does that).
+                //
+                // fd ownership: caller (Rust EventChannelReader) takes ownership; must close its copy.
+                // See: docs/rust/fd-ownership.md, docs/adr/0002-wifi-socket-fd-handoff.md §Socket Rules
+                val ownedFd =
+                    try {
+                        ParcelFileDescriptor.fromSocket(socket).detachFd()
+                    } catch (e: Exception) {
+                        val detail = "event-socket fd dup failed: ${e.javaClass.simpleName}"
+                        Timber.tag(TAG).d("openEventSocket: UnexpectedError during fd handoff (%s)", detail)
+                        _state.value = CameraWifiState.Error(CameraWifiError.UnexpectedError(e))
+                        socket.close()
+                        return@withContext Result.failure(e)
+                    }
+
+                // Event socket is NOT stored in activeSocket — the command channel binding keeps the
+                // network alive. Close Android's own reference to the event socket now.
+                try {
+                    socket.close()
+                } catch (_: Exception) {
+                    // Best-effort; fd has already been dup'd and detached.
+                }
+
+                _state.value = CameraWifiState.EventSocketHandedOff
+                Timber.tag(TAG).d("openEventSocket: EventSocketHandedOff, fd=%d", ownedFd)
 
                 Result.success(OwnedSocketHandle(ownedFd))
             }

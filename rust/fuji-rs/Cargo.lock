@@ -156,6 +156,7 @@ version = "0.1.0"
 dependencies = [
  "fuji-core",
  "fuji-ptp",
+ "tokio",
 ]
 
 [[package]]
@@ -164,6 +165,7 @@ version = "0.1.0"
 dependencies = [
  "fuji-core",
  "fuji-ptp",
+ "fuji-ptpip",
  "thiserror 2.0.18",
  "tokio",
 ]

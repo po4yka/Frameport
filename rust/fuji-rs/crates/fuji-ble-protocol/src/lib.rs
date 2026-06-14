@@ -36,7 +36,8 @@ pub use advertisement::{
 pub use handoff::BleWifiHandoff;
 pub use pairing::{PairingKind, PairingSession, PairingState};
 pub use payloads::{
-    AppInfo, LocationAndSpeed, ShootingRequest, build_app_info, build_device_name,
-    build_disconnect_reason, build_location_and_speed, build_location_sync_cycle,
-    build_shooting_request, parse_app_info, parse_location_and_speed, parse_passphrase, parse_ssid,
+    AppInfo, LocationAndSpeed, ShootingRequest, ShootingResponse, build_app_info,
+    build_device_name, build_disconnect_reason, build_location_and_speed,
+    build_location_sync_cycle, build_shooting_request, parse_app_info, parse_location_and_speed,
+    parse_passphrase, parse_shooting_response, parse_ssid,
 };

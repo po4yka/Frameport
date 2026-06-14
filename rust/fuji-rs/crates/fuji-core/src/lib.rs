@@ -462,6 +462,12 @@ pub enum TransportError {
     UnexpectedChannelClose,
     #[error("transport:channel-not-open")]
     ChannelNotOpen,
+    /// The event channel (PTP-IP port 55741) was closed by the peer or timed out.
+    ///
+    /// Returned by `EventChannelReader` when the TCP stream reaches EOF or the
+    /// remote closes the connection after `InitiateOpenCapture`.
+    #[error("transport:event-channel-closed")]
+    EventChannelClosed,
 }
 
 /// PTP/PTP-IP protocol errors.
@@ -510,8 +516,9 @@ pub enum ProtocolError {
 /// Source: error-model.md `Camera.*` family.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq, Hash)]
 pub enum CameraError {
-    #[error("camera:busy")]
-    Busy,
+    /// Camera responded BUSY. `attempts` is the number of tries made before giving up.
+    #[error("camera:busy after {attempts} attempts")]
+    Busy { attempts: u32 },
     #[error("camera:disconnected")]
     Disconnected,
     #[error("camera:sleeping")]
@@ -836,6 +843,10 @@ mod tests {
             TransportError::ChannelNotOpen,
             "TransportError::ChannelNotOpen"
         );
+        check_variant!(
+            TransportError::EventChannelClosed,
+            "TransportError::EventChannelClosed"
+        );
     }
 
     // ProtocolError — all 15 variants
@@ -909,7 +920,7 @@ mod tests {
     // CameraError — all 16 variants
     #[test]
     fn redaction_camera_error() {
-        check_variant!(CameraError::Busy, "CameraError::Busy");
+        check_variant!(CameraError::Busy { attempts: 0 }, "CameraError::Busy");
         check_variant!(CameraError::Disconnected, "CameraError::Disconnected");
         check_variant!(CameraError::Sleeping, "CameraError::Sleeping");
         check_variant!(CameraError::PoweredOff, "CameraError::PoweredOff");
@@ -1149,7 +1160,10 @@ mod tests {
             FujiError::Protocol(ProtocolError::HandshakeRejected),
             "FujiError::Protocol"
         );
-        check_variant!(FujiError::Camera(CameraError::Busy), "FujiError::Camera");
+        check_variant!(
+            FujiError::Camera(CameraError::Busy { attempts: 0 }),
+            "FujiError::Camera"
+        );
         check_variant!(
             FujiError::Media(MediaError::ThumbnailTimeout),
             "FujiError::Media"

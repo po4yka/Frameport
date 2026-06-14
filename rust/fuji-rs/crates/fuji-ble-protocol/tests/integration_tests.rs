@@ -17,8 +17,9 @@ use fuji_ble_protocol::{
     handoff::BleWifiHandoff,
     pairing::{PairingKind, PairingSession, PairingState},
     payloads::{
-        AppInfo, LocationAndSpeed, ShootingRequest, build_app_info, build_location_and_speed,
-        build_shooting_request, parse_app_info, parse_location_and_speed, parse_ssid,
+        AppInfo, LocationAndSpeed, ShootingRequest, ShootingResponse, build_app_info,
+        build_location_and_speed, build_shooting_request, parse_app_info, parse_location_and_speed,
+        parse_shooting_response, parse_ssid,
     },
 };
 use fuji_core::{BleProtocolError, FujiError};
@@ -379,4 +380,117 @@ fn ble_wifi_handoff_accessors_return_correct_values() {
     assert_eq!(handoff.ssid(), "FUJIFILM-X-T5-TEST");
     // Only assert length to avoid passphrase substring in failure messages.
     assert_eq!(handoff.passphrase().len(), "test-pass-fixture".len());
+}
+
+// ─── ShootingResponse golden fixture tests ────────────────────────────────────
+//
+// Each fixture is a 2-byte LE u16 synthetic payload constructed from the
+// documented layout in ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)".
+//
+// Fixture files under tests/fixtures/:
+//   shooting_response_accepted.bin         — [0x00, 0x00] → Accepted
+//   shooting_response_rejected_0x0005.bin  — [0x05, 0x00] → Rejected { raw_status: 5 }
+//   shooting_response_rejected_0x0100.bin  — [0x00, 0x01] → Rejected { raw_status: 256 }
+//
+// Governed by golden-bless-discipline.md — do not regenerate without human
+// approval and a commit-message rationale.
+//
+// UNCERTAINTY NOTE (master-constants.md line 836): No source provides a
+// comprehensive table of camera-returned status codes for CHR_SHOOTING_REQUEST
+// beyond the success/failure distinction.  These fixtures exercise the
+// structural parser only; the semantic mapping of non-zero codes is uncertain
+// pending X-T5 hardware verification.
+// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+
+/// Golden: `shooting_response_accepted.bin` → `ShootingResponse::Accepted`.
+///
+/// Fixture bytes: `[0x00, 0x00]` (u16 LE value 0, meaning camera accepted the
+/// shutter command).
+/// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+#[test]
+fn golden_shooting_response_accepted_fixture_parses_to_accepted() {
+    let fixture = include_bytes!("fixtures/shooting_response_accepted.bin");
+    assert_eq!(fixture.len(), 2, "fixture must be exactly 2 bytes (u16 LE)");
+    // Verify raw bytes match documented layout.
+    assert_eq!(fixture[0], 0x00, "byte 0 (status lo) must be 0x00");
+    assert_eq!(fixture[1], 0x00, "byte 1 (status hi) must be 0x00");
+    let resp = parse_shooting_response(fixture).unwrap();
+    assert_eq!(
+        resp,
+        ShootingResponse::Accepted,
+        "0x0000 LE must parse to ShootingResponse::Accepted"
+    );
+}
+
+/// Golden: `shooting_response_rejected_0x0005.bin` → `ShootingResponse::Rejected { raw_status: 5 }`.
+///
+/// Fixture bytes: `[0x05, 0x00]` (u16 LE value 5, non-zero → Rejected).
+/// The value 5 is synthetic — it is not a documented Fujifilm status code.
+/// It exercises the Rejected path and the LE byte ordering.
+/// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+#[test]
+fn golden_shooting_response_rejected_0x0005_fixture_parses_to_rejected() {
+    let fixture = include_bytes!("fixtures/shooting_response_rejected_0x0005.bin");
+    assert_eq!(fixture.len(), 2, "fixture must be exactly 2 bytes");
+    assert_eq!(fixture[0], 0x05, "byte 0 (status lo) must be 0x05");
+    assert_eq!(fixture[1], 0x00, "byte 1 (status hi) must be 0x00");
+    let resp = parse_shooting_response(fixture).unwrap();
+    assert_eq!(
+        resp,
+        ShootingResponse::Rejected { raw_status: 0x0005 },
+        "0x0005 LE must parse to ShootingResponse::Rejected {{ raw_status: 5 }}"
+    );
+}
+
+/// Golden: `shooting_response_rejected_0x0100.bin` → `ShootingResponse::Rejected { raw_status: 256 }`.
+///
+/// Fixture bytes: `[0x00, 0x01]` (u16 LE value 256 = 0x0100).  This fixture
+/// guards against big-endian confusion: a big-endian parser would read these
+/// bytes as 0x0001 (1), but the correct LE interpretation is 0x0100 (256).
+/// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+#[test]
+fn golden_shooting_response_rejected_0x0100_fixture_guards_endian_confusion() {
+    let fixture = include_bytes!("fixtures/shooting_response_rejected_0x0100.bin");
+    assert_eq!(fixture.len(), 2, "fixture must be exactly 2 bytes");
+    assert_eq!(fixture[0], 0x00, "byte 0 (status lo) must be 0x00");
+    assert_eq!(fixture[1], 0x01, "byte 1 (status hi) must be 0x01");
+    let resp = parse_shooting_response(fixture).unwrap();
+    assert_eq!(
+        resp,
+        ShootingResponse::Rejected { raw_status: 0x0100 },
+        "0x0100 LE must parse to ShootingResponse::Rejected {{ raw_status: 256 }}"
+    );
+    // Sanity-check: a big-endian misread would produce raw_status=1, not 256.
+    assert_ne!(
+        resp,
+        ShootingResponse::Rejected { raw_status: 0x0001 },
+        "must NOT be misread as big-endian (raw_status=1)"
+    );
+}
+
+/// Coverage: half-press, full-press, and release request encoding is unchanged.
+///
+/// Confirms that `ShootingRequest` round-trips are unaffected by the addition
+/// of `ShootingResponse`.
+/// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+#[test]
+fn shooting_request_half_full_release_coverage_after_response_addition() {
+    // S0 = release
+    assert_eq!(
+        build_shooting_request(ShootingRequest::S0Release),
+        [0x00, 0x00],
+        "S0Release must encode to [0x00, 0x00]"
+    );
+    // S1 = half-press / AF
+    assert_eq!(
+        build_shooting_request(ShootingRequest::S1HalfPress),
+        [0x01, 0x00],
+        "S1HalfPress must encode to [0x01, 0x00]"
+    );
+    // S2 = full-press / capture
+    assert_eq!(
+        build_shooting_request(ShootingRequest::S2FullPress),
+        [0x02, 0x00],
+        "S2FullPress must encode to [0x02, 0x00]"
+    );
 }

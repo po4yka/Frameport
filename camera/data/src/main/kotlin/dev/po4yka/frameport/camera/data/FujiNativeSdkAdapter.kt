@@ -5,6 +5,7 @@ import dev.po4yka.frameport.camera.api.CameraObjectHandle
 import dev.po4yka.frameport.camera.api.EndpointMetadata
 import dev.po4yka.frameport.camera.api.FujiNativeSdk
 import dev.po4yka.frameport.camera.api.SessionId
+import dev.po4yka.frameport.camera.api.ShutterAction
 import dev.po4yka.frameport.camera.api.TransferId
 import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.core.common.di.IoDispatcher
@@ -128,6 +129,19 @@ class FujiNativeSdkAdapter
                 nativeFujiSdk.cancelTransfer(transferId.value)
             }
         }
+
+        // cancel-safe: single withContext; stub returns success; no shared state mutated after cancellation.
+        // TODO(M16): wire to fuji-ffi JNI entry point for RemoteSession shutter command.
+        @Suppress("UNUSED_PARAMETER")
+        override suspend fun remoteShutter(
+            sessionId: SessionId,
+            action: ShutterAction,
+        ): Result<Unit> =
+            withContext(ioDispatcher) {
+                // Deferred JNI: the Rust RemoteSession is tested via fuji-sim.
+                // Return stub success so the Hilt graph compiles and callers can exercise the path.
+                Result.success(Unit)
+            }
 
         // ─── Helpers ─────────────────────────────────────────────────────────────
 

@@ -1,8 +1,8 @@
-//! `fuji-ptpip` — synchronous PTP-IP-over-TCP command client for Frameport.
+//! `fuji-ptpip` — PTP-IP-over-TCP client for Frameport.
 //!
 //! # Architecture
 //!
-//! This crate provides two things:
+//! This crate provides three things:
 //!
 //! 1. [`PtpIpTcpClient`] — a concrete synchronous command client that owns a
 //!    [`std::net::TcpStream`] and speaks PTP-IP on the command channel (port 55740
@@ -15,6 +15,10 @@
 //!    file descriptor to Rust.  These items preserve that API surface so
 //!    `fuji-transfer` can reference it without breaking when the production path
 //!    is wired up.
+//!
+//! 3. [`event`] / [`remote`] — async modules for the event channel reader and
+//!    remote-capture session state machine.  These are async (tokio-based) and
+//!    are used by `fuji-ffi` for the M15 remote-shutter path.
 //!
 //! # Streaming download
 //!
@@ -31,8 +35,22 @@
 //! `android.net.Network.bindSocket()` → `dup()` → Rust `OwnedFd` → `File` →
 //! wrapped in a synchronous BufReader/BufWriter on top of the fd.  That path will
 //! be provided by [`open_from_owned_socket_fd`] once the Android layer is wired up.
+//!
+//! # Safety
+//!
+//! The [`event`] module contains one `unsafe` block in `EventChannelReader::from_raw_fd`
+//! to wrap an Android-owned file descriptor into a `tokio::net::TcpStream` via
+//! `std::net::TcpStream::from_raw_fd`.  The safety contract (caller must transfer
+//! exclusive ownership of a valid TCP-socket fd) is documented at the call site and
+//! in `docs/rust/ffi-boundary.md`.  All other code in this crate is safe Rust.
 
-#![forbid(unsafe_code)]
+// unsafe_code is NOT forbidden at the crate level because event::EventChannelReader::from_raw_fd
+// requires unsafe { std::net::TcpStream::from_raw_fd(fd) } for the Android fd-handoff path.
+// The single unsafe block is guarded by a // SAFETY: comment per the project rules.
+// See docs/adr/0002-wifi-socket-fd-handoff.md and docs/rust/ffi-boundary.md.
+
+pub mod event;
+pub mod remote;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

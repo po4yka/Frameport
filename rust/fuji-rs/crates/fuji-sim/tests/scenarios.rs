@@ -1212,3 +1212,533 @@ async fn set_device_prop_payload_validation() {
 
     handle.shutdown();
 }
+
+// ── RemoteScenario tests ──────────────────────────────────────────────────────
+//
+// Design rules:
+//   - No fixed ports — all listeners on 127.0.0.1:0 (ephemeral).
+//   - No unconditional sleeps; delays are 0 ms for full determinism.
+//   - Reuse existing helpers: handshake(), op_no_data(), op_set_prop_value(),
+//     send_packet(), recv_packet().
+//   - All PTP/BLE constants come from fuji_ptp::constants — no bare hex.
+//   - fuji_ptpip::event::EventChannelReader and remote::RemoteSession drive
+//     the client side; the FakeCameraServer drives the server side.
+//   - CaptureComplete events are injected via a dedicated loopback listener
+//     because FakeCameraServer's event background task closes its stream after
+//     InitEventAck — it does not emit events autonomously yet.
+//
+// [H] marks assertions whose ground truth comes from docs/reference/master-constants.md
+// with uncertainty noted where the spec source is incomplete.
+
+// ── Helper: inject a CaptureComplete event over a fresh loopback pair ─────────
+//
+// Spawns a tokio task that:
+//   1. Accepts one connection on `listener`.
+//   2. Reads the InitEventRequest (12 bytes).
+//   3. Sends InitEventAck.
+//   4. Sends a PTP-IP Event packet for CAPTURE_COMPLETE (0x400D).
+//
+// Returns (JoinHandle for the injector task, addr the client should connect to).
+//
+// NOT cancel-safe: sequential .await points; never used under select!.
+fn spawn_event_injector(
+    listener: tokio::net::TcpListener,
+    txn_id: u32,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (mut srv, _) = listener.accept().await.expect("injector: accept");
+        // Read InitEventRequest (12 bytes).
+        let mut req_buf = [0u8; 12];
+        AsyncReadExt::read_exact(&mut srv, &mut req_buf)
+            .await
+            .expect("injector: read InitEventRequest");
+        // Send InitEventAck.
+        let ack = encode_packet(&PtpIpPacket::InitEventAck);
+        AsyncWriteExt::write_all(&mut srv, &ack)
+            .await
+            .expect("injector: write InitEventAck");
+        // Send CaptureComplete event (0x400D). [H] master-constants.md §4a.
+        let ev = encode_packet(&PtpIpPacket::Event {
+            event_code: fuji_ptp::constants::event_code::CAPTURE_COMPLETE,
+            transaction_id: txn_id,
+            params: vec![],
+        });
+        AsyncWriteExt::write_all(&mut srv, &ev)
+            .await
+            .expect("injector: write CaptureComplete");
+        // Hold the connection open briefly so the client can read the event.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario A: named constant values match documented ground truth.
+//
+// Synchronous — no .await, no server, no sockets. Verifies that every opcode
+// and property code referenced in the remote path comes from named constants
+// and matches the values in master-constants.md.
+//
+// cancel-safe: no .await points.
+// ─────────────────────────────────────────────────────────────────────────────
+#[test]
+fn remote_scenario_named_constants_match_ground_truth() {
+    use fuji_ptp::constants::{event_code, function_mode, opcode, prop_code};
+
+    // Command port: 55740. Event port: 55741. [H] master-constants.md §1.
+    assert_eq!(fuji_ptp::constants::PORT_COMMAND, 55740);
+    assert_eq!(fuji_ptp::constants::PORT_EVENT, 55741);
+
+    // SetDevicePropValue: 0x1016. [H]
+    assert_eq!(opcode::SET_DEVICE_PROP_VALUE, 0x1016);
+    // InitiateOpenCapture: 0x101C. [H]
+    assert_eq!(opcode::INITIATE_OPEN_CAPTURE, 0x101C);
+    // TerminateOpenCapture: 0x1018. [H]
+    assert_eq!(opcode::TERMINATE_OPEN_CAPTURE, 0x1018);
+
+    // ClientState prop code: 0xDF01. [H] master-constants.md §3b.
+    assert_eq!(prop_code::CLIENT_STATE, 0xDF01);
+    // REMOTE mode value: 5, UINT16. [H] master-constants.md §4b.
+    assert_eq!(function_mode::REMOTE, 5u16);
+
+    // CaptureComplete event: 0x400D. [H] master-constants.md §4a.
+    assert_eq!(event_code::CAPTURE_COMPLETE, 0x400D);
+    // ObjectAdded: 0x4002. [H]
+    assert_eq!(event_code::OBJECT_ADDED, 0x4002);
+    // DevicePropChanged: 0x4006. [H]
+    assert_eq!(event_code::DEVICE_PROP_CHANGED, 0x4006);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario B: SetFunctionMode(REMOTE) returns OK on first attempt (busy_count=0).
+//
+// Drives the data-write phase directly with op_set_prop_value() and asserts
+// the sim returns response_code::OK without any BUSY.
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_set_function_mode_ok_on_first_attempt() {
+    use fuji_ptp::constants::{function_mode, prop_code};
+
+    let config = FakeCameraBuilder::new().busy_count(0).build();
+    let srv = FakeCameraServer::bind(config).await.expect("bind");
+    let cmd_addr = srv.bound_addr();
+    let event_addr = srv.event_addr();
+    let handle = srv.run();
+
+    let test_body = timeout(Duration::from_secs(5), async {
+        let mut cmd = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut evt = TcpStream::connect(event_addr).await.expect("connect event");
+        let _ = handshake(&mut cmd, &mut evt).await;
+        op_no_data(&mut cmd, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+
+        // SetDevicePropValue(ClientState=REMOTE_MODE=5). UINT16 LE. [H]
+        let value: [u8; 2] = function_mode::REMOTE.to_le_bytes();
+        let code = op_set_prop_value(&mut cmd, 1, prop_code::CLIENT_STATE, &value).await;
+
+        assert_eq!(
+            code,
+            response_code::OK,
+            "SetFunctionMode(REMOTE) with busy_count=0 must return OK immediately"
+        );
+
+        send_goodbye(&mut cmd).await;
+    });
+
+    test_body
+        .await
+        .expect("remote_scenario_set_function_mode_ok_on_first_attempt timed out");
+    handle.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario C: SetFunctionMode(REMOTE) returns BUSY N times then OK.
+//
+// busy_count=2: first 2 calls return BUSY (0x2019), third returns OK.
+// The test drives all 3 rounds manually via op_set_prop_value().
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_busy_retry_then_ok() {
+    use fuji_ptp::constants::{function_mode, prop_code};
+
+    let config = FakeCameraBuilder::new().busy_count(2).build();
+    let srv = FakeCameraServer::bind(config).await.expect("bind");
+    let cmd_addr = srv.bound_addr();
+    let event_addr = srv.event_addr();
+    let handle = srv.run();
+
+    let test_body = timeout(Duration::from_secs(5), async {
+        let mut cmd = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut evt = TcpStream::connect(event_addr).await.expect("connect event");
+        let _ = handshake(&mut cmd, &mut evt).await;
+        op_no_data(&mut cmd, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+
+        let value: [u8; 2] = function_mode::REMOTE.to_le_bytes();
+
+        // Round 1: BUSY expected.
+        let r1 = op_set_prop_value(&mut cmd, 1, prop_code::CLIENT_STATE, &value).await;
+        assert_eq!(
+            r1,
+            response_code::BUSY,
+            "round 1 must be BUSY (busy_count=2)"
+        );
+
+        // Round 2: BUSY expected.
+        let r2 = op_set_prop_value(&mut cmd, 2, prop_code::CLIENT_STATE, &value).await;
+        assert_eq!(
+            r2,
+            response_code::BUSY,
+            "round 2 must be BUSY (busy_count=2)"
+        );
+
+        // Round 3: OK — busy_count exhausted.
+        let r3 = op_set_prop_value(&mut cmd, 3, prop_code::CLIENT_STATE, &value).await;
+        assert_eq!(
+            r3,
+            response_code::OK,
+            "round 3 must be OK after busy_count=2 exhausted"
+        );
+
+        send_goodbye(&mut cmd).await;
+    });
+
+    test_body
+        .await
+        .expect("remote_scenario_busy_retry_then_ok timed out");
+    handle.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario D: InitiateOpenCapture returns OK from the sim.
+//
+// Sends SetFunctionMode(REMOTE) + InitiateOpenCapture (0x101C) and asserts OK
+// for both. Does not wait for events — that is Scenario E.
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_initiate_open_capture_returns_ok() {
+    use fuji_ptp::constants::{function_mode, prop_code};
+
+    let config = FakeCameraBuilder::new().busy_count(0).build();
+    let srv = FakeCameraServer::bind(config).await.expect("bind");
+    let cmd_addr = srv.bound_addr();
+    let event_addr = srv.event_addr();
+    let handle = srv.run();
+
+    let test_body = timeout(Duration::from_secs(5), async {
+        let mut cmd = TcpStream::connect(cmd_addr).await.expect("connect cmd");
+        let mut evt = TcpStream::connect(event_addr).await.expect("connect event");
+        let _ = handshake(&mut cmd, &mut evt).await;
+        op_no_data(&mut cmd, opcode::OPEN_SESSION, 0, vec![SESSION_ID]).await;
+
+        // Step 1: SetFunctionMode(REMOTE). [H]
+        let value: [u8; 2] = function_mode::REMOTE.to_le_bytes();
+        let set_code = op_set_prop_value(&mut cmd, 1, prop_code::CLIENT_STATE, &value).await;
+        assert_eq!(
+            set_code,
+            response_code::OK,
+            "SetFunctionMode(REMOTE) must return OK"
+        );
+
+        // Step 2: InitiateOpenCapture (0x101C, no params, no data phase). [H]
+        let open_resp = op_no_data(&mut cmd, opcode::INITIATE_OPEN_CAPTURE, 2, vec![]).await;
+        assert!(
+            matches!(
+                &open_resp,
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "InitiateOpenCapture must return OK, got {open_resp:?}"
+        );
+
+        send_goodbye(&mut cmd).await;
+    });
+
+    test_body
+        .await
+        .expect("remote_scenario_initiate_open_capture_returns_ok timed out");
+    handle.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario E: EventChannelReader receives CaptureComplete (0x400D) within one
+// poll_next() call from a synthetic loopback injector.
+//
+// Uses spawn_event_injector() to provide a CaptureComplete packet on the event
+// channel. EventChannelReader::handshake() + poll_next() must return
+// FujiEvent::CaptureComplete with the expected transaction_id.
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_event_reader_receives_capture_complete() {
+    use fuji_ptpip::event::{EventChannelReader, FujiEvent};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind event injector");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // TXN=7 — arbitrary but distinct from 0.
+    let injector = spawn_event_injector(listener, 7);
+
+    let client = timeout(Duration::from_secs(3), async {
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to injector");
+        let mut reader = EventChannelReader::from_stream(stream);
+
+        // Handshake: sends InitEventRequest → reads InitEventAck.
+        // NOT cancel-safe: driven to completion here.
+        reader.handshake().await.expect("event handshake");
+
+        // poll_next: reads the CaptureComplete packet the injector sends.
+        // NOT cancel-safe: driven to completion here.
+        let ev = reader.poll_next().await.expect("poll_next must return Ok");
+
+        assert!(
+            matches!(
+                ev,
+                FujiEvent::CaptureComplete {
+                    transaction_id: 7,
+                    ..
+                }
+            ),
+            "expected FujiEvent::CaptureComplete {{ txn=7 }}, got {ev:?}"
+        );
+    });
+
+    client
+        .await
+        .expect("remote_scenario_event_reader_receives_capture_complete timed out");
+    injector.await.expect("injector task must complete cleanly");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario F: EventChannelReader on EOF returns TransportError::EventChannelClosed.
+//
+// The injector drops the TCP connection after InitEventAck (no event sent).
+// poll_next() must return Err(FujiError::Transport(TransportError::EventChannelClosed)).
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_event_reader_eof_returns_channel_closed() {
+    use fuji_core::{FujiError, TransportError};
+    use fuji_ptpip::event::EventChannelReader;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind eof listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // Server: accept, handshake, then drop (EOF).
+    // NOT cancel-safe: sequential .await; never used under select!.
+    tokio::spawn(async move {
+        let (mut srv, _) = listener.accept().await.expect("accept");
+        let mut req_buf = [0u8; 12];
+        let _ = AsyncReadExt::read_exact(&mut srv, &mut req_buf).await;
+        let ack = encode_packet(&PtpIpPacket::InitEventAck);
+        let _ = AsyncWriteExt::write_all(&mut srv, &ack).await;
+        // Drop `srv` here → EOF on the client side.
+    });
+
+    let client = timeout(Duration::from_secs(3), async {
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let mut reader = EventChannelReader::from_stream(stream);
+        reader.handshake().await.expect("event handshake");
+        let result = reader.poll_next().await;
+        assert!(
+            matches!(
+                result,
+                Err(FujiError::Transport(TransportError::EventChannelClosed))
+            ),
+            "expected EventChannelClosed on EOF, got {result:?}"
+        );
+    });
+
+    client
+        .await
+        .expect("remote_scenario_event_reader_eof_returns_channel_closed timed out");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario G: RemoteSession::set_function_mode_remote() returns OK when
+// busy_count=0 — drives the operation via the typed RemoteSession API.
+//
+// Uses a dedicated loopback pair (not FakeCameraServer) to have full control
+// over the server side, matching the pattern in fuji-ptpip's own unit tests.
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_remote_session_set_function_mode_ok() {
+    use fuji_ptp::constants::response_code as rc;
+    use fuji_ptpip::event::EventChannelReader;
+    use fuji_ptpip::remote::{RemoteSession, RemoteSessionConfig};
+
+    // Minimal event-channel stub: accept, handshake, idle.
+    let evt_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind evt");
+    let evt_addr = evt_listener.local_addr().expect("evt local_addr");
+    tokio::spawn(async move {
+        let (mut srv, _) = evt_listener.accept().await.expect("evt accept");
+        let mut buf = [0u8; 12];
+        let _ = AsyncReadExt::read_exact(&mut srv, &mut buf).await;
+        let ack = encode_packet(&PtpIpPacket::InitEventAck);
+        let _ = AsyncWriteExt::write_all(&mut srv, &ack).await;
+        // Idle — hold connection open.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    });
+
+    // Command-channel stub: accept, reply to SetDevicePropValue with OK.
+    // NOT cancel-safe: sequential .await; never used under select!.
+    let cmd_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cmd");
+    let cmd_addr = cmd_listener.local_addr().expect("cmd local_addr");
+    tokio::spawn(async move {
+        let (mut srv, _) = cmd_listener.accept().await.expect("cmd accept");
+        // Read OperationRequest + StartData + EndData (3 packets).
+        for _ in 0..3u8 {
+            let mut len_buf = [0u8; 4];
+            let _ = AsyncReadExt::read_exact(&mut srv, &mut len_buf).await;
+            let len = u32::from_le_bytes(len_buf) as usize;
+            let mut body = vec![0u8; len.saturating_sub(4)];
+            let _ = AsyncReadExt::read_exact(&mut srv, &mut body).await;
+        }
+        // Reply OperationResponse(OK, txn=1).
+        let resp = encode_packet(&PtpIpPacket::OperationResponse {
+            response_code: rc::OK,
+            transaction_id: 1,
+            result_params: vec![],
+        });
+        let _ = AsyncWriteExt::write_all(&mut srv, &resp).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    });
+
+    let test = timeout(Duration::from_secs(3), async {
+        // Build EventChannelReader from async loopback stream.
+        let evt_stream = tokio::net::TcpStream::connect(evt_addr)
+            .await
+            .expect("connect evt");
+        let mut evt_reader = EventChannelReader::from_stream(evt_stream);
+        evt_reader.handshake().await.expect("evt handshake");
+
+        // Build RemoteSession.
+        let cfg = RemoteSessionConfig {
+            max_attempts: 3,
+            retry_delay_ms: 0,
+            capture_complete_timeout_ms: 2_000,
+        };
+        let session = RemoteSession::new(cfg, evt_reader);
+
+        // Connect command stream.
+        let mut cmd = tokio::net::TcpStream::connect(cmd_addr)
+            .await
+            .expect("connect cmd");
+
+        // Drive set_function_mode_remote — &self, stream: &mut S (AsyncRead+AsyncWrite+Unpin).
+        let result = session.set_function_mode_remote(&mut cmd, 1).await;
+        assert!(
+            result.is_ok(),
+            "set_function_mode_remote must return Ok, got {result:?}"
+        );
+    });
+
+    test.await
+        .expect("remote_scenario_remote_session_set_function_mode_ok timed out");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario H: RemoteSession::set_function_mode_remote() returns
+// CameraError::Busy { attempts } when max_attempts is exhausted.
+//
+// Command-channel stub always replies BUSY. RemoteSession with max_attempts=2
+// must return CameraError::Busy { attempts: 2 } after two attempts.
+//
+// cancel-safe: test entry point — driven to completion by #[tokio::test] runtime.
+// ─────────────────────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn remote_scenario_remote_session_busy_exhausted() {
+    use fuji_core::{CameraError, FujiError};
+    use fuji_ptp::constants::response_code as rc;
+    use fuji_ptpip::event::EventChannelReader;
+    use fuji_ptpip::remote::{RemoteSession, RemoteSessionConfig};
+
+    // Event-channel stub: accept, handshake, idle.
+    let evt_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind evt");
+    let evt_addr = evt_listener.local_addr().expect("evt local_addr");
+    tokio::spawn(async move {
+        let (mut srv, _) = evt_listener.accept().await.expect("evt accept");
+        let mut buf = [0u8; 12];
+        let _ = AsyncReadExt::read_exact(&mut srv, &mut buf).await;
+        let ack = encode_packet(&PtpIpPacket::InitEventAck);
+        let _ = AsyncWriteExt::write_all(&mut srv, &ack).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    });
+
+    // Command stub: always drains the 3 write-phase packets and replies BUSY.
+    // NOT cancel-safe: sequential .await; never used under select!.
+    let cmd_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cmd");
+    let cmd_addr = cmd_listener.local_addr().expect("cmd local_addr");
+    tokio::spawn(async move {
+        let (mut srv, _) = cmd_listener.accept().await.expect("cmd accept");
+        // max_attempts=2 → 2 attempts; drain + reply BUSY for each.
+        for attempt in 1u32..=2 {
+            for _ in 0..3u8 {
+                let mut len_buf = [0u8; 4];
+                let _ = AsyncReadExt::read_exact(&mut srv, &mut len_buf).await;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                let mut body = vec![0u8; len.saturating_sub(4)];
+                let _ = AsyncReadExt::read_exact(&mut srv, &mut body).await;
+            }
+            let resp = encode_packet(&PtpIpPacket::OperationResponse {
+                response_code: rc::BUSY,
+                transaction_id: attempt,
+                result_params: vec![],
+            });
+            let _ = AsyncWriteExt::write_all(&mut srv, &resp).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    });
+
+    let test = timeout(Duration::from_secs(3), async {
+        let evt_stream = tokio::net::TcpStream::connect(evt_addr)
+            .await
+            .expect("connect evt");
+        let mut evt_reader = EventChannelReader::from_stream(evt_stream);
+        evt_reader.handshake().await.expect("evt handshake");
+
+        let cfg = RemoteSessionConfig {
+            max_attempts: 2,
+            retry_delay_ms: 0,
+            capture_complete_timeout_ms: 2_000,
+        };
+        let session = RemoteSession::new(cfg, evt_reader);
+
+        let mut cmd = tokio::net::TcpStream::connect(cmd_addr)
+            .await
+            .expect("connect cmd");
+
+        let result = session.set_function_mode_remote(&mut cmd, 1).await;
+        assert!(
+            matches!(
+                result,
+                Err(FujiError::Camera(CameraError::Busy { attempts: 2 }))
+            ),
+            "expected CameraError::Busy {{ attempts: 2 }}, got {result:?}"
+        );
+    });
+
+    test.await
+        .expect("remote_scenario_remote_session_busy_exhausted timed out");
+}

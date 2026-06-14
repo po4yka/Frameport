@@ -16,7 +16,9 @@
 
 use fuji_core::{BleProtocolError, FujiError, FujiResult};
 
-use crate::constants::{APP_INFO_PAYLOAD_LEN, LOCATION_AND_SPEED_PAYLOAD_LEN};
+use crate::constants::{
+    APP_INFO_PAYLOAD_LEN, LOCATION_AND_SPEED_PAYLOAD_LEN, SHOOTING_REQUEST_PAYLOAD_LEN,
+};
 
 // ─── ShootingRequest ─────────────────────────────────────────────────────────
 
@@ -41,6 +43,83 @@ pub enum ShootingRequest {
 /// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
 pub fn build_shooting_request(state: ShootingRequest) -> [u8; 2] {
     (state as u16).to_le_bytes()
+}
+
+// ─── ShootingResponse ────────────────────────────────────────────────────────
+
+/// The camera's acknowledgement of a `CHR_SHOOTING_REQUEST` write.
+///
+/// # Source and uncertainty
+/// `CHR_SHOOTING_REQUEST` is a **Write-only** characteristic (see
+/// ble-wifi-discovery.md §"Camera Control" and master-constants.md §5c).
+/// The camera's acknowledgement is delivered as the GATT write-callback
+/// status (`onCharacteristicWrite`) — not as a separate notification
+/// characteristic.  When the Android GATT stack exposes this status as raw
+/// bytes for parsing (e.g. in a higher-level framing layer), those bytes are
+/// a 2-byte LE u16:
+///
+/// | Value    | Meaning                              | Source confidence |
+/// |----------|--------------------------------------|-------------------|
+/// | `0x0000` | Accepted — camera acknowledged the   | [H] LFJ, XPN, XBL |
+/// |          | shutter command successfully.        |                   |
+/// | other    | Rejected — GATT error or camera busy.| Inferred from     |
+/// |          | The raw status code is preserved.    | BLE spec + XPN    |
+///
+/// **Uncertainty:** No source provides a comprehensive table of
+/// camera-returned status codes for this specific characteristic beyond the
+/// success/failure distinction.  Treat any non-zero value as `Rejected` and
+/// surface the raw code to callers for diagnostics.  Verify on X-T5 hardware.
+///
+/// # Payload layout
+/// - Bytes 0–1: u16 LE status code.  Exactly 2 bytes.
+///
+/// # Privacy
+/// This parser never logs raw byte values.  No device identifiers appear
+/// in any field.
+///
+/// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShootingResponse {
+    /// Camera accepted the shutter command.  Wire value `0x0000`.
+    Accepted,
+    /// Camera rejected the command or returned a GATT error.
+    /// The raw u16 status code is preserved for diagnostics.
+    Rejected {
+        /// The raw u16 LE status code returned by the camera.
+        raw_status: u16,
+    },
+}
+
+/// Parse a 2-byte LE `CHR_SHOOTING_REQUEST` write-callback acknowledgement
+/// payload into a typed [`ShootingResponse`].
+///
+/// Exactly 2 bytes are required.  `0x0000` maps to [`ShootingResponse::Accepted`];
+/// any other value maps to [`ShootingResponse::Rejected`] with the raw code
+/// preserved.
+///
+/// # Errors
+/// Returns `BleProtocolError::InvalidPayloadLength` when `bytes.len() != 2`.
+/// Returns `BleProtocolError::MalformedPayload` on an internal slice error
+/// (should never fire given the length check, but is correct for defence in depth).
+///
+/// Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+pub fn parse_shooting_response(bytes: &[u8]) -> FujiResult<ShootingResponse> {
+    if bytes.len() != SHOOTING_REQUEST_PAYLOAD_LEN {
+        return Err(FujiError::BleProtocol(
+            BleProtocolError::InvalidPayloadLength,
+        ));
+    }
+    // bounds: checked len == 2 above; [0..2] is always in range
+    let status = u16::from_le_bytes(
+        bytes[0..2]
+            .try_into()
+            .map_err(|_| FujiError::BleProtocol(BleProtocolError::MalformedPayload))?,
+    );
+    if status == 0x0000 {
+        Ok(ShootingResponse::Accepted)
+    } else {
+        Ok(ShootingResponse::Rejected { raw_status: status })
+    }
 }
 
 // ─── ApplicationInformation ──────────────────────────────────────────────────
@@ -274,6 +353,63 @@ pub fn build_disconnect_reason(reason: u16) -> [u8; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ShootingResponse ─────────────────────────────────────────────────────
+
+    #[test]
+    fn shooting_response_accepted_parses_from_zero_status() {
+        // 0x0000 LE = camera accepted the shutter command.
+        // Source: ble-wifi-discovery.md §"ShootingRequest (Remote Shutter)". [H] LFJ, XPN, XBL
+        let bytes = [0x00u8, 0x00];
+        let resp = parse_shooting_response(&bytes).unwrap();
+        assert_eq!(resp, ShootingResponse::Accepted);
+    }
+
+    #[test]
+    fn shooting_response_rejected_preserves_nonzero_status() {
+        // Any non-zero status is Rejected with the raw code preserved.
+        // Synthetic fixture — status 0x0005 is not a documented Fujifilm code;
+        // used here purely to exercise the Rejected path.
+        let bytes = [0x05u8, 0x00]; // 0x0005 LE
+        let resp = parse_shooting_response(&bytes).unwrap();
+        assert_eq!(resp, ShootingResponse::Rejected { raw_status: 0x0005 });
+    }
+
+    #[test]
+    fn shooting_response_rejected_high_byte_status() {
+        // Status 0x0100 LE = [0x00, 0x01] — exercises big-endian confusion guard.
+        let bytes = [0x00u8, 0x01]; // 0x0100 LE
+        let resp = parse_shooting_response(&bytes).unwrap();
+        assert_eq!(resp, ShootingResponse::Rejected { raw_status: 0x0100 });
+    }
+
+    #[test]
+    fn shooting_response_wrong_length_returns_invalid_payload_length() {
+        // Zero bytes — too short.
+        let err = parse_shooting_response(&[]).unwrap_err();
+        assert_eq!(
+            err,
+            FujiError::BleProtocol(BleProtocolError::InvalidPayloadLength)
+        );
+    }
+
+    #[test]
+    fn shooting_response_one_byte_returns_invalid_payload_length() {
+        let err = parse_shooting_response(&[0x00]).unwrap_err();
+        assert_eq!(
+            err,
+            FujiError::BleProtocol(BleProtocolError::InvalidPayloadLength)
+        );
+    }
+
+    #[test]
+    fn shooting_response_three_bytes_returns_invalid_payload_length() {
+        let err = parse_shooting_response(&[0x00, 0x00, 0x00]).unwrap_err();
+        assert_eq!(
+            err,
+            FujiError::BleProtocol(BleProtocolError::InvalidPayloadLength)
+        );
+    }
 
     // ── ShootingRequest ──────────────────────────────────────────────────────
 

@@ -11,7 +11,9 @@ import dev.po4yka.frameport.camera.api.TransferRepository
 import dev.po4yka.frameport.camera.data.CameraRepositoryImpl
 import dev.po4yka.frameport.camera.data.FujiNativeSdkAdapter
 import dev.po4yka.frameport.camera.data.MediaRepositoryImpl
+import dev.po4yka.frameport.camera.data.RemoteCapabilityCheckerBinding
 import dev.po4yka.frameport.camera.data.TransferRepositoryImpl
+import dev.po4yka.frameport.camera.domain.RemoteCapabilityChecker
 import javax.inject.Singleton
 
 /**
@@ -41,4 +43,8 @@ interface CameraBindingsModule {
     @Binds
     @Singleton
     fun bindFujiNativeSdk(impl: FujiNativeSdkAdapter): FujiNativeSdk
+
+    @Binds
+    @Singleton
+    fun bindRemoteCapabilityChecker(impl: RemoteCapabilityCheckerBinding): RemoteCapabilityChecker
 }

@@ -396,6 +396,29 @@ pub fn dispatch_operation(
             }
         }
 
+        // ── InitiateCapture (0x100E) ─────────────────────────────────────────
+        // Remote shutter: triggers a capture. Returns OK immediately.
+        // master-constants.md §2a; ptp-ptpip.md opcode table. [H]
+        op if op == opcode::INITIATE_CAPTURE => {
+            Ok(DispatchResult::Packets(vec![ok_response(transaction_id)]))
+        }
+
+        // ── InitiateOpenCapture (0x101C) ──────────────────────────────────────
+        // Opens the remote-capture session. Per protocol the camera then opens
+        // the event (55741) and liveview (55742) channels. The sim returns OK;
+        // the event-channel path is exercised separately in scenarios.rs Scenario E.
+        // master-constants.md §2a; ptp-ptpip.md opcode table. [H]
+        op if op == opcode::INITIATE_OPEN_CAPTURE => {
+            Ok(DispatchResult::Packets(vec![ok_response(transaction_id)]))
+        }
+
+        // ── TerminateOpenCapture (0x1018) ─────────────────────────────────────
+        // Closes the remote-capture session. Returns OK.
+        // master-constants.md §2a; ptp-ptpip.md opcode table. [H]
+        op if op == opcode::TERMINATE_OPEN_CAPTURE => {
+            Ok(DispatchResult::Packets(vec![ok_response(transaction_id)]))
+        }
+
         // ── Unrecognised opcode ───────────────────────────────────────────────
         // Return OperationNotSupported rather than panicking or dropping silently.
         _ => Ok(DispatchResult::Packets(vec![
@@ -508,6 +531,10 @@ const OPERATIONS_SUPPORTED: &[u16] = &[
     opcode::GET_OBJECT,      // 0x1009 — full object data
     opcode::GET_THUMB,       // 0x100A — JPEG thumbnail
     opcode::GET_PARTIAL_OBJECT, // 0x101B — 1 MB chunk download loop (Wi-Fi import)
+    // Remote-capture opcodes (M15) — master-constants.md §2a. [H]
+    opcode::INITIATE_CAPTURE,       // 0x100E — remote shutter trigger
+    opcode::TERMINATE_OPEN_CAPTURE, // 0x1018 — close remote-capture session
+    opcode::INITIATE_OPEN_CAPTURE,  // 0x101C — open remote-capture session (event+liveview)
 ];
 
 /// Device properties advertised in the DeviceInfo DevicePropertiesSupported array.

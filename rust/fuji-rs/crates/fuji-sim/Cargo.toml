@@ -10,3 +10,6 @@ fuji-core.workspace = true
 fuji-ptp.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "macros", "sync", "io-util", "time"] }
+
+[dev-dependencies]
+fuji-ptpip.workspace = true

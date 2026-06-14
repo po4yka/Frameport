@@ -148,6 +148,27 @@ interface FujiNativeSdk {
 
     // cancel-safe: single delegated call; idempotent if transferId is unknown.
     suspend fun cancelTransfer(transferId: TransferId)
+
+    /**
+     * Send a remote shutter action to the camera over PTP-IP.
+     *
+     * Wire mapping (master-constants.md §3, docs/protocol/wifi-ptp-ip.md):
+     *   HalfPress / FullPress → InitiateCapture (0x100E) via RemoteSession
+     *   Release               → TerminateOpenCapture (0x1018) via RemoteSession
+     *
+     * JNI wiring is DEFERRED to M16: the adapter currently returns a stub success
+     * or NotImplemented via [NativeFujiSdk]. The canonical RemoteSession is tested
+     * in Rust via fuji-sim. TODO(M16): wire to fuji-ffi JNI entry point.
+     *
+     * @param sessionId Active PTP-IP session returned by [openWifiSession].
+     * @param action    The shutter state to send (HalfPress, FullPress, or Release).
+     * @return [Result.success] on acceptance; [Result.failure] with a typed error message on rejection.
+     */
+    // cancel-safe: single withContext call delegated to JNI stub; no shared mutable state mutated after cancellation.
+    suspend fun remoteShutter(
+        sessionId: SessionId,
+        action: ShutterAction,
+    ): Result<Unit>
 }
 
 interface CameraRepository {

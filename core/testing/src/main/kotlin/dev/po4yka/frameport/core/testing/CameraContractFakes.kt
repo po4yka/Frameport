@@ -13,6 +13,7 @@ import dev.po4yka.frameport.camera.api.FujiNativeSdk
 import dev.po4yka.frameport.camera.api.ImportState
 import dev.po4yka.frameport.camera.api.MediaRepository
 import dev.po4yka.frameport.camera.api.SessionId
+import dev.po4yka.frameport.camera.api.ShutterAction
 import dev.po4yka.frameport.camera.api.TransferId
 import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.camera.api.TransferRepository
@@ -120,6 +121,13 @@ class FakeFujiNativeSdk : FujiNativeSdk {
     override suspend fun cancelTransfer(transferId: TransferId) {
         cancelledTransfers.add(transferId)
     }
+
+    // cancel-safe: no real suspension; returns stub success.
+    // TODO(M16): add control API (setRemoteShutterResult) when JNI is wired.
+    override suspend fun remoteShutter(
+        sessionId: SessionId,
+        action: ShutterAction,
+    ): Result<Unit> = Result.success(Unit)
 }
 
 // ─── FakeCameraRepository ─────────────────────────────────────────────────────

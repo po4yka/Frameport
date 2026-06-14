@@ -76,6 +76,20 @@ class FakeCameraWifiConnector : CameraWifiConnector {
         return Result.success(OwnedSocketHandle(armedFd))
     }
 
+    // cancel-safe: no real suspension; state transitions are immediate.
+    override suspend fun openEventSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle> {
+        val error = armedError
+        if (error != null) {
+            armedError = null
+            _state.value = CameraWifiState.Error(error)
+            return Result.failure(IllegalStateException("FakeCameraWifiConnector: armed error: $error"))
+        }
+        _state.value = CameraWifiState.EventSocketRequested
+        _state.value = CameraWifiState.EventSocketBound
+        _state.value = CameraWifiState.EventSocketHandedOff
+        return Result.success(OwnedSocketHandle(armedFd))
+    }
+
     // cancel-safe: idempotent; second call is a no-op; no real suspension.
     override suspend fun release(handle: CameraNetworkHandle) {
         if (!releasedOnce.compareAndSet(false, true)) {
