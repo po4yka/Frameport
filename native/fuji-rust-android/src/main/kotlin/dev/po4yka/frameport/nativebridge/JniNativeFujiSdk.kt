@@ -7,64 +7,151 @@ class JniNativeFujiSdk(
     private val libraryState: NativeLibraryState by lazy { loader.load() }
 
     override val diagnosticState: NativeFujiDiagnosticState
-        get() = if (libraryState.isLoaded) {
-            NativeFujiDiagnosticState(
-                isNativeLibraryLoaded = true,
-                message = libraryState.message,
-            )
-        } else {
-            NativeFujiDiagnosticState(
-                isNativeLibraryLoaded = false,
-                message = libraryState.message,
-                failure = libraryState.failure,
-            )
-        }
-
-    override fun version(): String = callOrFallback(
-        nativeCall = NativeFujiJni::nativeVersion,
-        fallbackCall = fallback::version,
-    )
-
-    override fun initialize(): Result<Unit> = callResultOrFallback(
-        nativeCall = {
-            NativeFujiJni.nativeInitialize().toUnitResult("native_initialize")
-        },
-        fallbackCall = fallback::initialize,
-    )
-
-    override fun shutdown(): Result<Unit> = callResultOrFallback(
-        nativeCall = {
-            NativeFujiJni.nativeShutdown().toUnitResult("native_shutdown")
-        },
-        fallbackCall = fallback::shutdown,
-    )
-
-    override fun openNoopSession(): Result<NativeCameraSession> = callResultOrFallback(
-        nativeCall = {
-            val sessionId = NativeFujiJni.nativeOpenNoopSession()
-            if (sessionId > 0L) {
-                Result.success(
-                    NativeCameraSession(
-                        id = sessionId,
-                        cameraId = null,
-                        isNoOp = true,
-                    ),
+        get() =
+            if (libraryState.isLoaded) {
+                NativeFujiDiagnosticState(
+                    isNativeLibraryLoaded = true,
+                    message = libraryState.message,
                 )
             } else {
-                Result.failure(IllegalStateException("native_open_noop_session failed with code $sessionId"))
+                NativeFujiDiagnosticState(
+                    isNativeLibraryLoaded = false,
+                    message = libraryState.message,
+                    failure = libraryState.failure,
+                )
             }
-        },
-        fallbackCall = fallback::openNoopSession,
-    )
 
-    override fun closeSession(session: NativeCameraSession): Result<Unit> = callResultOrFallback(
-        nativeCall = {
-            NativeFujiJni.nativeCloseSession(session.id).toUnitResult("native_close_session")
-        },
-        fallbackCall = {
-            fallback.closeSession(session)
-        },
-    )
+    override fun version(): String =
+        callOrFallback(
+            nativeCall = NativeFujiJni::nativeVersion,
+            fallbackCall = fallback::version,
+        )
+
+    override fun initialize(): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni.nativeInitialize().toUnitResult("native_initialize")
+            },
+            fallbackCall = fallback::initialize,
+        )
+
+    override fun shutdown(): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni.nativeShutdown().toUnitResult("native_shutdown")
+            },
+            fallbackCall = fallback::shutdown,
+        )
+
+    override fun openNoopSession(): Result<NativeCameraSession> =
+        callResultOrFallback(
+            nativeCall = {
+                val sessionId = NativeFujiJni.nativeOpenNoopSession()
+                if (sessionId > 0L) {
+                    Result.success(
+                        NativeCameraSession(
+                            id = sessionId,
+                            cameraId = null,
+                            isNoOp = true,
+                        ),
+                    )
+                } else {
+                    Result.failure(IllegalStateException("native_open_noop_session failed with code $sessionId"))
+                }
+            },
+            fallbackCall = fallback::openNoopSession,
+        )
+
+    override fun closeSession(session: NativeCameraSession): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni.nativeCloseSession(session.id).toUnitResult("native_close_session")
+            },
+            fallbackCall = {
+                fallback.closeSession(session)
+            },
+        )
+
+    override fun openWifiSession(
+        commandFd: Int,
+        endpointMetadata: String,
+    ): Result<NativeCameraSession> =
+        callResultOrFallback(
+            nativeCall = {
+                val sessionId = NativeFujiJni.nativeOpenWifiSession(commandFd, endpointMetadata)
+                if (sessionId > 0L) {
+                    Result.success(
+                        NativeCameraSession(
+                            id = sessionId,
+                            cameraId = null,
+                            isNoOp = false,
+                        ),
+                    )
+                } else {
+                    Result.failure(
+                        IllegalStateException("native_open_wifi_session failed with code $sessionId"),
+                    )
+                }
+            },
+            fallbackCall = { fallback.openWifiSession(commandFd, endpointMetadata) },
+        )
+
+    override fun listMedia(session: NativeCameraSession): Result<ByteArray> =
+        callResultOrFallback(
+            nativeCall = {
+                val bytes = NativeFujiJni.nativeListMedia(session.id)
+                if (bytes != null) {
+                    Result.success(bytes)
+                } else {
+                    Result.failure(
+                        IllegalStateException("native_list_media failed: null result for session ${session.id}"),
+                    )
+                }
+            },
+            fallbackCall = { fallback.listMedia(session) },
+        )
+
+    override fun getThumbnail(
+        session: NativeCameraSession,
+        objectHandle: Long,
+    ): Result<ByteArray> =
+        callResultOrFallback(
+            nativeCall = {
+                val bytes = NativeFujiJni.nativeGetThumbnail(session.id, objectHandle)
+                if (bytes != null) {
+                    Result.success(bytes)
+                } else {
+                    Result.failure(
+                        IllegalStateException(
+                            "native_get_thumbnail failed: null result for session ${session.id} handle $objectHandle",
+                        ),
+                    )
+                }
+            },
+            fallbackCall = { fallback.getThumbnail(session, objectHandle) },
+        )
+
+    override fun downloadObjectToFd(
+        session: NativeCameraSession,
+        objectHandle: Long,
+        outputFd: Int,
+    ): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni
+                    .nativeDownloadObjectToFd(session.id, objectHandle, outputFd)
+                    .toUnitResult("native_download_object_to_fd")
+            },
+            fallbackCall = { fallback.downloadObjectToFd(session, objectHandle, outputFd) },
+        )
+
+    override fun cancelTransfer(transferId: Long): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni.nativeCancelTransfer(transferId).toUnitResult("native_cancel_transfer")
+            },
+            fallbackCall = { fallback.cancelTransfer(transferId) },
+        )
 
     private fun <T> callOrFallback(
         nativeCall: () -> T,
@@ -76,6 +163,8 @@ class JniNativeFujiSdk(
         } catch (_: UnsatisfiedLinkError) {
             fallbackCall()
         } catch (_: SecurityException) {
+            fallbackCall()
+        } catch (_: NativeException) {
             fallbackCall()
         }
     }
@@ -91,6 +180,8 @@ class JniNativeFujiSdk(
             fallbackCall().recoverCatching { throw error }
         } catch (error: SecurityException) {
             fallbackCall().recoverCatching { throw error }
+        } catch (error: NativeException) {
+            Result.failure(error)
         }
     }
 
