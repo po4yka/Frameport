@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Camera Wi-Fi permissions — merged into the application manifest at build time.
+
+        CHANGE_WIFI_STATE: required for WifiNetworkSpecifier / requestNetwork on all API levels.
+        NEARBY_WIFI_DEVICES: required on API 33+ (TIRAMISU) for Wi-Fi peer discovery without
+          location permission. neverForLocation ensures no location data is derived from Wi-Fi.
+
+        DO NOT add ACCESS_FINE_LOCATION — Frameport does not use location for Wi-Fi routing.
+        See: docs/adr/0002-wifi-socket-fd-handoff.md, .claude/rules/privacy-local-first.md
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
+</manifest>

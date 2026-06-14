@@ -20,8 +20,6 @@ import dev.po4yka.frameport.camera.media.MediaImportWriter
 import dev.po4yka.frameport.camera.media.NoOpMediaImportWriter
 import dev.po4yka.frameport.camera.usb.CameraUsbConnector
 import dev.po4yka.frameport.camera.usb.NoOpCameraUsbConnector
-import dev.po4yka.frameport.camera.wifi.CameraWifiConnector
-import dev.po4yka.frameport.camera.wifi.NoOpCameraWifiConnector
 import dev.po4yka.frameport.nativebridge.JniNativeFujiSdk
 import dev.po4yka.frameport.nativebridge.NativeFujiSdk
 import javax.inject.Singleton
@@ -48,10 +46,6 @@ object CameraBindingsModule {
     @Provides
     @Singleton
     fun providesFujiBleClient(): FujiBleClient = NoOpFujiBleClient()
-
-    @Provides
-    @Singleton
-    fun providesCameraWifiConnector(): CameraWifiConnector = NoOpCameraWifiConnector()
 
     @Provides
     @Singleton
