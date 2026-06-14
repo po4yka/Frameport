@@ -1,7 +1,8 @@
 package dev.po4yka.frameport.camera.data
 
-import dev.po4yka.frameport.camera.api.DiagnosticEvent
+import dev.po4yka.frameport.camera.api.DiagnosticCategory
 import dev.po4yka.frameport.camera.api.DiagnosticsRepository
+import dev.po4yka.frameport.camera.api.ErrorLayer
 import dev.po4yka.frameport.core.storage.session.ExitReasonDedupStore
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -44,11 +45,12 @@ class MemoryLimiterExitScannerTest {
             // Act
             scanner.scan(listOf(entry))
 
-            // Assert — one DiagnosticEvent with Category.Native and category-only message
+            // Assert — one DiagnosticEvent with NativeBoundary layer and category-only message
             coVerify(exactly = 1) {
                 diagnosticsRepository.recordEvent(
                     match { event ->
-                        event.category == DiagnosticEvent.Category.Native &&
+                        event.layer == ErrorLayer.NativeBoundary &&
+                            event.category == DiagnosticCategory.NativeBoundaryEvent &&
                             event.message == "Process terminated by system memory limiter" &&
                             !event.message.contains("12345") // no raw pid
                     },

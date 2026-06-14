@@ -5,12 +5,10 @@ import dagger.Module
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import dev.po4yka.frameport.camera.api.CameraRepository
-import dev.po4yka.frameport.camera.api.DiagnosticsRepository
 import dev.po4yka.frameport.camera.api.FujiNativeSdk
 import dev.po4yka.frameport.camera.api.MediaRepository
 import dev.po4yka.frameport.camera.api.TransferRepository
 import dev.po4yka.frameport.camera.data.CameraRepositoryImpl
-import dev.po4yka.frameport.camera.data.DiagnosticsRepositoryImpl
 import dev.po4yka.frameport.camera.data.FujiNativeSdkAdapter
 import dev.po4yka.frameport.camera.data.MediaRepositoryImpl
 import dev.po4yka.frameport.camera.data.TransferRepositoryImpl
@@ -23,6 +21,7 @@ import javax.inject.Singleton
  * [CameraWifiConnector] binding lives in :camera:wifi's [CameraWifiModule] (already present).
  * [NativeFujiSdk] (the JNI low-level interface) is provided by [ConnectorBindingsModule].
  * Dispatcher qualifiers are provided by :app's [AppDispatchersModule].
+ * [DiagnosticsRepository] binding lives in :camera:diagnostics's [DiagnosticsModule].
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -38,10 +37,6 @@ interface CameraBindingsModule {
     @Binds
     @Singleton
     fun bindTransferRepository(impl: TransferRepositoryImpl): TransferRepository
-
-    @Binds
-    @Singleton
-    fun bindDiagnosticsRepository(impl: DiagnosticsRepositoryImpl): DiagnosticsRepository
 
     @Binds
     @Singleton

@@ -95,16 +95,6 @@ sealed interface ImportState {
     data object Cancelled : ImportState
 }
 
-// ─── Diagnostics ──────────────────────────────────────────────────────────────
-
-data class DiagnosticEvent(
-    val timestampEpochMillis: Long,
-    val category: Category,
-    val message: String,
-) {
-    enum class Category { Session, Media, Transfer, Storage, Native, Permission }
-}
-
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
 /**

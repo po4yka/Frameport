@@ -2,6 +2,8 @@ package dev.po4yka.frameport.camera.domain
 
 import app.cash.turbine.test
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
+import dev.po4yka.frameport.camera.api.DiagnosticCategory
+import dev.po4yka.frameport.camera.api.ErrorLayer
 import dev.po4yka.frameport.camera.api.ImportState
 import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.camera.api.TransferId
@@ -79,8 +81,9 @@ class ImportObjectUseCaseTest {
             // Then
             assertEquals(1, fakeDiagnosticsRepository.recordedEvents.size)
             val event = fakeDiagnosticsRepository.recordedEvents.first()
-            assertEquals(dev.po4yka.frameport.camera.api.DiagnosticEvent.Category.Transfer, event.category)
-            assertTrue(event.message.contains("${handle.value}"))
+            assertEquals(ErrorLayer.MediaTransfer, event.layer)
+            assertEquals(DiagnosticCategory.MediaTransferEvent, event.category)
+            assertEquals("Import completed", event.message)
         }
 
     @Test
@@ -103,8 +106,9 @@ class ImportObjectUseCaseTest {
             // Then: exactly one diagnostic event recorded for the failure
             assertEquals(1, fakeDiagnosticsRepository.recordedEvents.size)
             val event = fakeDiagnosticsRepository.recordedEvents.first()
-            assertEquals(dev.po4yka.frameport.camera.api.DiagnosticEvent.Category.Transfer, event.category)
-            assertTrue(event.message.contains("${handle.value}"))
+            assertEquals(ErrorLayer.MediaTransfer, event.layer)
+            assertEquals(DiagnosticCategory.MediaTransferEvent, event.category)
+            assertEquals("Import failed", event.message)
         }
 
     @Test

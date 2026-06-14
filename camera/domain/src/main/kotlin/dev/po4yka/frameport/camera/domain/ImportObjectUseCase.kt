@@ -1,11 +1,13 @@
 package dev.po4yka.frameport.camera.domain
 
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
-import dev.po4yka.frameport.camera.api.DiagnosticEvent
 import dev.po4yka.frameport.camera.api.DiagnosticsRepository
+import dev.po4yka.frameport.camera.api.ErrorLayer
 import dev.po4yka.frameport.camera.api.ImportState
 import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.camera.api.TransferRepository
+import dev.po4yka.frameport.camera.api.defaultCategory
+import dev.po4yka.frameport.camera.api.diagnosticEvent
 import dev.po4yka.frameport.core.common.di.IoDispatcher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
@@ -39,28 +41,31 @@ class ImportObjectUseCase
                     val event =
                         when (state) {
                             is ImportState.Imported -> {
-                                DiagnosticEvent(
-                                    timestampEpochMillis = System.currentTimeMillis(),
-                                    category = DiagnosticEvent.Category.Transfer,
-                                    message = "Import completed for handle ${handle.value}",
+                                diagnosticEvent(
+                                    layer = ErrorLayer.MediaTransfer,
+                                    category = defaultCategory(ErrorLayer.MediaTransfer),
+                                    // Category-only message — raw handle value is a numeric
+                                    // object id, not a device identifier, but omitted for
+                                    // uniformity with other category-only messages.
+                                    message = "Import completed",
                                 )
                             }
 
                             is ImportState.Failed -> {
-                                DiagnosticEvent(
-                                    timestampEpochMillis = System.currentTimeMillis(),
-                                    category = DiagnosticEvent.Category.Transfer,
+                                diagnosticEvent(
+                                    layer = ErrorLayer.MediaTransfer,
+                                    category = defaultCategory(ErrorLayer.MediaTransfer),
                                     // Do not interpolate the raw error message — it may
-                                    // carry filenames/paths. Category + handle only.
-                                    message = "Import failed for handle ${handle.value}",
+                                    // carry filenames/paths. Category-only message.
+                                    message = "Import failed",
                                 )
                             }
 
                             is ImportState.Cancelled -> {
-                                DiagnosticEvent(
-                                    timestampEpochMillis = System.currentTimeMillis(),
-                                    category = DiagnosticEvent.Category.Transfer,
-                                    message = "Import cancelled for handle ${handle.value}",
+                                diagnosticEvent(
+                                    layer = ErrorLayer.MediaTransfer,
+                                    category = defaultCategory(ErrorLayer.MediaTransfer),
+                                    message = "Import cancelled",
                                 )
                             }
 

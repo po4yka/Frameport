@@ -1,8 +1,11 @@
 package dev.po4yka.frameport.camera.data
 
-import dev.po4yka.frameport.camera.api.DiagnosticEvent
 import dev.po4yka.frameport.camera.api.DiagnosticsRepository
+import dev.po4yka.frameport.camera.api.ErrorLayer
+import dev.po4yka.frameport.camera.api.defaultCategory
+import dev.po4yka.frameport.camera.api.diagnosticEvent
 import dev.po4yka.frameport.core.storage.session.ExitReasonDedupStore
+import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -56,11 +59,12 @@ class MemoryLimiterExitScanner
                 val isNew = dedupStore.recordIfAbsent(id = id, recordedAtMillis = nowMillis)
                 if (isNew) {
                     diagnosticsRepository.recordEvent(
-                        DiagnosticEvent(
-                            timestampEpochMillis = entry.timestampMillis,
-                            category = DiagnosticEvent.Category.Native,
+                        diagnosticEvent(
+                            layer = ErrorLayer.NativeBoundary,
+                            category = defaultCategory(ErrorLayer.NativeBoundary),
                             // Category-only message — no raw PID, serial, IP, or description text.
                             message = "Process terminated by system memory limiter",
+                            at = Instant.ofEpochMilli(entry.timestampMillis),
                         ),
                     )
                 }

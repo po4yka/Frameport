@@ -12,9 +12,11 @@ import androidx.annotation.RequiresApi
 import androidx.core.app.ServiceCompat
 import dagger.hilt.android.AndroidEntryPoint
 import dev.po4yka.frameport.camera.api.CameraRepository
-import dev.po4yka.frameport.camera.api.DiagnosticEvent
 import dev.po4yka.frameport.camera.api.DiagnosticsRepository
+import dev.po4yka.frameport.camera.api.ErrorLayer
 import dev.po4yka.frameport.camera.api.TransferProgress
+import dev.po4yka.frameport.camera.api.defaultCategory
+import dev.po4yka.frameport.camera.api.diagnosticEvent
 import dev.po4yka.frameport.core.storage.session.SessionProgressStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -178,9 +180,9 @@ class CameraSessionService : Service() {
             val interrupted = sessionProgressStore.queryInProgress()
             if (interrupted.isNotEmpty()) {
                 diagnosticsRepository.recordEvent(
-                    DiagnosticEvent(
-                        timestampEpochMillis = System.currentTimeMillis(),
-                        category = DiagnosticEvent.Category.Transfer,
+                    diagnosticEvent(
+                        layer = ErrorLayer.MediaTransfer,
+                        category = defaultCategory(ErrorLayer.MediaTransfer),
                         // Category-only message — no raw session id, object handle, or sizes.
                         message = "Previous transfer interrupted",
                     ),
