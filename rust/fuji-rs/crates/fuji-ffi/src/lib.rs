@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use fuji_core::SDK_VERSION;
-use jni::JNIEnv;
-use jni::objects::{JClass, JString};
+use fuji_liveview::{LiveViewParser, run_liveview_loop};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::{jbyteArray, jint, jlong, jstring};
+use jni::{JNIEnv, JavaVM};
 
 const OK: i32 = 0;
 const ERR_NOT_INITIALIZED: i32 = -1;
@@ -23,6 +24,23 @@ static SESSIONS: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
 static WIFI_SESSIONS: Mutex<BTreeMap<i64, OwnedFd>> = Mutex::new(BTreeMap::new());
 /// Active transfer IDs. Populated by download operations once downstream is wired.
 static TRANSFERS: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
+
+/// Live-view session handle: stop flag + worker thread join handle.
+struct LiveViewHandle {
+    /// Set to true to signal the worker read loop to exit cleanly.
+    stop_flag: Arc<AtomicBool>,
+    /// Join handle for the dedicated worker std::thread.
+    /// Wrapped in Option so we can take() it in stop to join without consuming self.
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Active live-view sessions: session_id -> LiveViewHandle.
+/// Access serialised by Mutex; the worker thread is separate (std::thread).
+static LIVEVIEW_SESSIONS: Mutex<BTreeMap<i64, LiveViewHandle>> = Mutex::new(BTreeMap::new());
+
+/// Cached JavaVM handle for attach_current_thread_as_daemon in worker threads.
+/// Set once in nativeLiveViewStart (or JNI_OnLoad when wired). JavaVM is Send + Sync.
+static JAVA_VM: Mutex<Option<JavaVM>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -61,7 +79,27 @@ pub fn native_shutdown() -> i32 {
         }
         Err(_) => false,
     };
-    if sessions_ok && wifi_ok && transfers_ok {
+    // Signal all live-view workers to stop; join them so the JVM can safely
+    // unload. Entries are removed from the registry as we drain them.
+    let liveview_ok = match LIVEVIEW_SESSIONS.lock() {
+        Ok(mut lv) => {
+            for handle in lv.values() {
+                handle.stop_flag.store(true, Ordering::Relaxed);
+            }
+            // Collect keys first to avoid holding the guard while joining.
+            let keys: Vec<i64> = lv.keys().copied().collect();
+            for key in keys {
+                if let Some(mut handle) = lv.remove(&key)
+                    && let Some(jh) = handle.worker.take()
+                {
+                    let _ = jh.join();
+                }
+            }
+            true
+        }
+        Err(_) => false,
+    };
+    if sessions_ok && wifi_ok && transfers_ok && liveview_ok {
         OK
     } else {
         ERR_PANIC
@@ -478,6 +516,309 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
             ERR_PANIC as jint
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// JNI exports — live-view
+// ---------------------------------------------------------------------------
+
+/// Start the Rust live-view read loop for a PTP-IP session.
+///
+/// # Fd ownership
+/// `live_view_fd` is Android-owned and already dup'd by the caller. Rust dups
+/// it again immediately inside this function (via `BorrowedFd::try_clone_to_owned`),
+/// takes ownership of the dup, and passes the dup's raw fd to the async read
+/// loop via `TcpStream::from_raw_fd`. Android MUST NOT close or use
+/// `live_view_fd` after this call returns `OK`.
+///
+/// # JNI / thread safety
+/// `callback_obj` is registered as a `GlobalRef` before spawning the worker
+/// thread. The `JNIEnv` from this call is NOT captured — a fresh `JNIEnv` is
+/// obtained inside the worker via `JavaVM::attach_current_thread_as_daemon`.
+/// The `JavaVM` is cached in `JAVA_VM` for subsequent calls.
+///
+/// Returns `OK` (0) on success or a negative ERR_* sentinel on failure.
+/// On panic, throws `NativeException` and returns `ERR_PANIC`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nativeLiveViewStart(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    session_id: jlong,
+    live_view_fd: jint,
+    callback_obj: JObject<'_>,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if !INITIALIZED.load(Ordering::SeqCst) {
+            return ERR_NOT_INITIALIZED;
+        }
+        if session_id <= 0 {
+            return ERR_INVALID_SESSION;
+        }
+        if live_view_fd < 0 {
+            return ERR_INVALID_SESSION;
+        }
+
+        // ── Dup the fd before registering the GlobalRef (fail fast on bad fd) ──
+        // SAFETY: live_view_fd is supplied by Android, valid for the duration of
+        // this JNI call. We immediately dup it and store only the OwnedFd; the
+        // original fd remains Android-owned. The dup is later converted to a
+        // TcpStream inside the worker thread via from_raw_fd (see worker below).
+        let owned_fd: OwnedFd =
+            match unsafe { BorrowedFd::borrow_raw(live_view_fd) }.try_clone_to_owned() {
+                Ok(fd) => fd,
+                Err(_) => return ERR_PANIC,
+            };
+
+        // ── Register callback as a GlobalRef ──────────────────────────────────
+        // GlobalRef is Send; it can be moved into the worker thread.
+        let callback_global: GlobalRef = match env.new_global_ref(&callback_obj) {
+            Ok(r) => r,
+            Err(_) => return ERR_PANIC,
+        };
+
+        // ── Cache the JavaVM for use in the worker thread ─────────────────────
+        // env.get_java_vm() is cheap and idempotent. Cache it in JAVA_VM so we
+        // don't need to pass it through every call site.
+        let vm: JavaVM = match env.get_java_vm() {
+            Ok(vm) => vm,
+            Err(_) => return ERR_PANIC,
+        };
+        match JAVA_VM.lock() {
+            Ok(mut guard) => *guard = Some(vm),
+            Err(_) => return ERR_PANIC,
+        }
+
+        // ── Stop flag shared between this scope and the worker ─────────────────
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_worker = Arc::clone(&stop_flag);
+
+        // ── Spawn a dedicated std::thread for the read loop ───────────────────
+        // A std::thread running a current_thread tokio runtime is the safest
+        // pattern for JNI daemon attachment: we attach once at thread start,
+        // run the full async loop, detach on exit. JNIEnv is NEVER moved across
+        // thread boundaries — it is obtained fresh inside the worker.
+        let raw_fd = {
+            use std::os::fd::IntoRawFd;
+            owned_fd.into_raw_fd()
+        };
+
+        let worker = std::thread::Builder::new()
+            .name("frameport-liveview-worker".to_owned())
+            .spawn(move || {
+                // ── Obtain the cached JavaVM ───────────────────────────────────
+                let vm = match JAVA_VM.lock() {
+                    Ok(guard) => match guard.as_ref() {
+                        Some(vm) => {
+                            // SAFETY: JavaVM::clone is a pointer copy; the JVM
+                            // process stays alive for the duration of this thread.
+                            // SAFETY: We need a JavaVM to attach. The pointer in
+                            // the global Mutex is valid for the process lifetime.
+                            //
+                            // jni 0.21 JavaVM does not implement Clone directly;
+                            // we rebuild from the raw pointer.
+                            let raw = vm.get_java_vm_pointer();
+                            // SAFETY: raw is a valid *mut JavaVM pointer obtained
+                            // from a live JVM in the same process. The JVM outlives
+                            // this worker thread (daemon threads are killed at JVM
+                            // exit; we exit first via stop_flag).
+                            // No .unwrap(): on the (practically impossible) null/invalid
+                            // pointer path, close the owned fd and exit the worker cleanly
+                            // rather than panic across the thread boundary.
+                            match unsafe { JavaVM::from_raw(raw) } {
+                                Ok(vm) => vm,
+                                Err(_) => {
+                                    // SAFETY: raw_fd was produced by into_raw_fd() above; we own it.
+                                    unsafe { libc_close(raw_fd) };
+                                    return;
+                                }
+                            }
+                        }
+                        None => {
+                            // Close the fd we took ownership of before returning.
+                            // SAFETY: raw_fd was produced by into_raw_fd() above;
+                            // we own it and must close it on error paths.
+                            unsafe { libc_close(raw_fd) };
+                            return;
+                        }
+                    },
+                    Err(_) => {
+                        unsafe { libc_close(raw_fd) };
+                        return;
+                    }
+                };
+
+                // ── Attach this thread to the JVM as a daemon ─────────────────
+                let mut jni_env = match vm.attach_current_thread_as_daemon() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        unsafe { libc_close(raw_fd) };
+                        return;
+                    }
+                };
+
+                // ── Build TcpStream from the raw fd ───────────────────────────
+                // SAFETY: raw_fd is the result of OwnedFd::into_raw_fd() on a
+                // valid, dup'd socket fd. We take exclusive ownership here;
+                // Android owns and will close the original. The TcpStream will
+                // close raw_fd when dropped (end of this thread's scope).
+                let std_stream = unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
+                // Convert to a non-blocking tokio TcpStream inside the runtime.
+
+                // ── Run a current-thread tokio runtime ────────────────────────
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => {
+                        // std_stream will close raw_fd on drop.
+                        return;
+                    }
+                };
+
+                rt.block_on(async move {
+                    // Convert std TcpStream to tokio TcpStream (requires non-blocking).
+                    let _ = std_stream.set_nonblocking(true);
+                    let mut stream = match tokio::net::TcpStream::from_std(std_stream) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+
+                    let session = match fuji_core::SessionId::new(session_id) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    let mut parser = LiveViewParser::new(session);
+
+                    // on_frame: called synchronously for each parsed JPEG frame.
+                    // Allocates a JVM byte[] (unavoidable JNI marshaling cost;
+                    // excluded from the Rust zero-alloc constraint per spec).
+                    // No logging on the hot path per privacy-local-first.md and
+                    // the per-frame-no-log constraint.
+                    let on_frame = |jpeg: &[u8]| {
+                        // Allocate JVM byte[] from the JPEG slice.
+                        let byte_arr = match jni_env.byte_array_from_slice(jpeg) {
+                            Ok(arr) => arr,
+                            Err(_) => return,
+                        };
+                        // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
+                        let _ = jni_env.call_method(
+                            callback_global.as_obj(),
+                            "onLiveViewFrame",
+                            "([B)V",
+                            &[JValue::Object(&byte_arr)],
+                        );
+                        // Clear any pending exception so the next frame can proceed.
+                        if jni_env.exception_check().unwrap_or(false) {
+                            let _ = jni_env.exception_clear();
+                        }
+                    };
+
+                    // run_liveview_loop is cancel-safe (see fuji-liveview doc).
+                    let _ =
+                        run_liveview_loop(&mut parser, &mut stream, on_frame, &stop_flag_worker)
+                            .await;
+                    // GlobalRef (callback_global) is dropped here -> JVM reference released.
+                });
+            });
+
+        let join_handle = match worker {
+            Ok(jh) => jh,
+            Err(_) => return ERR_PANIC,
+        };
+
+        // ── Register the handle in the live-view registry ─────────────────────
+        match LIVEVIEW_SESSIONS.lock() {
+            Ok(mut lv) => {
+                lv.insert(
+                    session_id,
+                    LiveViewHandle {
+                        stop_flag,
+                        worker: Some(join_handle),
+                    },
+                );
+                OK
+            }
+            Err(_) => ERR_PANIC,
+        }
+    }));
+
+    match result {
+        Ok(code) => code as jint,
+        Err(_) => {
+            throw_native(&mut env, "native panic in nativeLiveViewStart");
+            ERR_PANIC as jint
+        }
+    }
+}
+
+/// Stop the Rust live-view read loop for a session.
+///
+/// Sets the atomic stop flag, joins the worker thread (draining it), releases
+/// the callback GlobalRef, and removes the session from the live-view registry.
+///
+/// Idempotent: unknown or already-stopped sessions return `OK` without error.
+///
+/// Returns `OK` (0) on clean stop, or `ERR_PANIC` + `NativeException` on panic.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nativeLiveViewStop(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    session_id: jlong,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if session_id <= 0 {
+            // Idempotent: invalid id is not an error.
+            return OK;
+        }
+
+        // Remove the handle from the registry while holding the lock.
+        let maybe_handle = match LIVEVIEW_SESSIONS.lock() {
+            Ok(mut lv) => lv.remove(&session_id),
+            Err(_) => return ERR_PANIC,
+        };
+
+        // If no handle found, the session was already stopped (idempotent).
+        let mut handle = match maybe_handle {
+            Some(h) => h,
+            None => return OK,
+        };
+
+        // Signal the worker to exit.
+        handle.stop_flag.store(true, Ordering::Relaxed);
+
+        // Join the worker thread; this waits for the read loop to drain and exit.
+        // The GlobalRef inside the worker is dropped when the async block exits.
+        if let Some(jh) = handle.worker.take() {
+            let _ = jh.join();
+        }
+
+        OK
+    }));
+
+    match result {
+        Ok(code) => code as jint,
+        Err(_) => {
+            throw_native(&mut env, "native panic in nativeLiveViewStop");
+            ERR_PANIC as jint
+        }
+    }
+}
+
+/// Close a raw file descriptor via libc. Used on error paths where an OwnedFd
+/// was converted to a raw fd via into_raw_fd() and must be closed manually.
+///
+/// # Safety
+/// Caller must guarantee `fd` is a valid open file descriptor and that no other
+/// code will use or close it after this call.
+#[inline]
+unsafe fn libc_close(fd: i32) {
+    // SAFETY: precondition documented on callers above.
+    unsafe extern "C" {
+        fn close(fd: i32) -> i32;
+    }
+    // SAFETY: close() is safe to call with a valid fd; precondition on callers.
+    let _ = unsafe { close(fd) };
 }
 
 // ---------------------------------------------------------------------------

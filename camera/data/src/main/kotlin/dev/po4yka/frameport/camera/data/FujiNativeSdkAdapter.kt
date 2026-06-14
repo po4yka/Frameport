@@ -10,10 +10,15 @@ import dev.po4yka.frameport.camera.api.TransferId
 import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.core.common.di.IoDispatcher
 import dev.po4yka.frameport.core.model.FrameportError
+import dev.po4yka.frameport.nativebridge.LiveViewFrameCallback
 import dev.po4yka.frameport.nativebridge.NativeCameraSession
 import dev.po4yka.frameport.nativebridge.NativeFujiSdk
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
@@ -129,6 +134,60 @@ class FujiNativeSdkAdapter
                 nativeFujiSdk.cancelTransfer(transferId.value)
             }
         }
+
+        // cancel-safe: callbackFlow with awaitClose; cancellation triggers awaitClose block
+        // which calls nativeLiveViewStop. The Rust stop flag is set atomically; the worker
+        // thread drains and exits. No shared mutable state is mutated after cancellation.
+        //
+        // Latest-frame-wins contract: BufferOverflow.DROP_OLDEST ensures the Rust read loop
+        // is never blocked on a slow Compose consumer. Callers must not assume every frame
+        // is delivered — only the most recent frame is guaranteed at any point.
+        //
+        // fd ownership: liveViewFd is Android-owned and already dup'd by the caller (via
+        // CameraWifiConnector.openLiveViewSocket). Rust dups it again inside nativeLiveViewStart
+        // and takes exclusive ownership of the dup. Android MUST NOT close liveViewFd after
+        // this flow is collected. See docs/rust/fd-ownership.md and ADR-0002.
+        override fun liveViewFrames(
+            sessionId: SessionId,
+            liveViewFd: Int,
+        ): Flow<ByteArray> =
+            // capacity = 2: one frame being decoded by the consumer, one buffered.
+            // onBufferOverflow = DROP_OLDEST: latest-frame-wins; the Rust read loop
+            // is never blocked waiting for a slow Compose consumer.
+            callbackFlow<ByteArray> {
+                // Register a callback that forwards each JPEG frame into the channel.
+                // trySend never blocks (channel uses DROP_OLDEST overflow policy).
+                // jpeg.copyOf(): the Rust ring-buffer slice is valid only for the
+                // duration of the callback; we must copy before returning.
+                val callback =
+                    LiveViewFrameCallback { jpeg ->
+                        channel.trySend(jpeg.copyOf())
+                        // DROP_OLDEST policy: ChannelResult.isFailure means a frame was
+                        // dropped — expected at high frame rates with a slow consumer.
+                        // latest-frame-wins, so we intentionally ignore the result.
+                        Unit
+                    }
+
+                // Start the Rust read loop. On success, the worker thread is running.
+                val startResult = nativeFujiSdk.nativeLiveViewStart(sessionId.value, liveViewFd, callback)
+                if (startResult.isFailure) {
+                    close(startResult.exceptionOrNull() ?: IllegalStateException("nativeLiveViewStart failed"))
+                    return@callbackFlow
+                }
+
+                // awaitClose is called when the collector cancels or the flow is closed.
+                // It stops the Rust read loop cleanly (sets the stop flag + joins the worker).
+                awaitClose {
+                    nativeFujiSdk.nativeLiveViewStop(sessionId.value)
+                }
+            }
+                // Latest-frame-wins: a plain callbackFlow buffers with SUSPEND and trySend
+                // would DROP the NEW frame when full (keeping stale frames). buffer(1,
+                // DROP_OLDEST) fuses into the callbackFlow channel so trySend always succeeds
+                // by evicting the OLDEST queued frame — the camera read loop never blocks and
+                // the consumer always sees the most recent frame.
+                .buffer(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+                .flowOn(ioDispatcher)
 
         // cancel-safe: single withContext; stub returns success; no shared state mutated after cancellation.
         // TODO(M16): wire to fuji-ffi JNI entry point for RemoteSession shutter command.

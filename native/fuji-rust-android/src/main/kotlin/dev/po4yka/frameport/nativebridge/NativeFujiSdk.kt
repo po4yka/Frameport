@@ -2,6 +2,23 @@ package dev.po4yka.frameport.nativebridge
 
 import dev.po4yka.frameport.core.model.CameraId
 
+/**
+ * Per-frame callback for live-view JPEG frames delivered from the Rust read loop.
+ *
+ * Implementations receive complete JPEG frames (SOI … EOI inclusive) as [ByteArray].
+ * This allocation is the unavoidable JVM marshaling cost at the JNI boundary and is
+ * explicitly excluded from the Rust zero-alloc parser constraint.
+ *
+ * Contract:
+ * - Called on the Rust worker thread (attached to the JVM as a daemon thread).
+ * - MUST NOT block; use [kotlinx.coroutines.channels.SendChannel.trySend] with
+ *   [kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST] to stay latest-frame-wins.
+ * - MUST NOT retain [jpeg] beyond the call (the backing buffer may be reused).
+ */
+fun interface LiveViewFrameCallback {
+    fun onLiveViewFrame(jpeg: ByteArray)
+}
+
 interface NativeFujiSdk {
     val diagnosticState: NativeFujiDiagnosticState
 
@@ -48,6 +65,50 @@ interface NativeFujiSdk {
     ): Result<Unit>
 
     fun cancelTransfer(transferId: Long): Result<Unit>
+
+    /**
+     * Start the Rust live-view read loop for [sessionId] over [liveViewFd].
+     *
+     * fd ownership contract:
+     * [liveViewFd] is an Android-owned, dup'd raw socket fd already bound to the
+     * camera network and connected to port 55742 (LIVEVIEW_CHANNEL_PORT = 0xD9BE,
+     * master-constants.md §1). Rust dups it immediately inside [nativeLiveViewStart]
+     * and takes ownership of the dup. Android MUST NOT close or use this fd after
+     * calling this method.
+     *
+     * [callback] is registered as a JNI GlobalRef inside the Rust worker. The
+     * GlobalRef is released when [nativeLiveViewStop] completes or on panic.
+     *
+     * The worker thread is a dedicated std::thread running a current-thread tokio
+     * runtime; the JNIEnv is obtained inside the worker via
+     * `JavaVM::attach_current_thread_as_daemon`. The JNIEnv is NEVER captured across
+     * thread boundaries — see jni-error-mapping.md.
+     *
+     * @param sessionId Session id returned by [openWifiSession].
+     * @param liveViewFd Android-owned, dup'd fd for port 55742. Ownership transfers to Rust.
+     * @param callback Receives each parsed JPEG frame on the Rust worker thread.
+     * @return [Result.success] if the worker started; [Result.failure] on native error.
+     */
+    fun nativeLiveViewStart(
+        sessionId: Long,
+        liveViewFd: Int,
+        callback: LiveViewFrameCallback,
+    ): Result<Unit>
+
+    /**
+     * Stop the Rust live-view read loop for [sessionId].
+     *
+     * Sets the atomic stop flag, waits for the worker thread to drain and exit,
+     * releases the JNI GlobalRef for the callback, removes the session from the
+     * live-view registry, and closes the Rust dup of the fd.
+     *
+     * Idempotent: calling stop on an unknown or already-stopped session returns
+     * [Result.success] without side effects.
+     *
+     * @param sessionId Session id of the running live-view worker.
+     * @return [Result.success] on clean stop; [Result.failure] on panic (ERR_PANIC).
+     */
+    fun nativeLiveViewStop(sessionId: Long): Result<Unit>
 }
 
 data class NativeCameraSession(

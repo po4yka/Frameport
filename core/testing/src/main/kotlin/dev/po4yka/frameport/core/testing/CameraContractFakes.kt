@@ -19,6 +19,7 @@ import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.camera.api.TransferRepository
 import dev.po4yka.frameport.core.model.FrameportError
 import dev.po4yka.frameport.core.model.FrameportErrorException
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +50,13 @@ class FakeFujiNativeSdk : FujiNativeSdk {
     private var thumbnailBytes: ByteArray = byteArrayOf()
     private var progressSequence: List<TransferProgress> = emptyList()
 
+    /** Frames emitted by [liveViewFrames]. Push frames via [emitLiveViewFrame]. */
+    private val _liveViewFrames =
+        MutableSharedFlow<ByteArray>(
+            extraBufferCapacity = 4,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
+
     val closedSessions = mutableListOf<SessionId>()
     val cancelledTransfers = mutableListOf<TransferId>()
 
@@ -74,6 +82,14 @@ class FakeFujiNativeSdk : FujiNativeSdk {
 
     fun emitProgress(vararg progress: TransferProgress) {
         progressSequence = progress.toList()
+    }
+
+    /**
+     * Push a JPEG frame into the fake live-view stream. Latest-frame-wins; excess frames are dropped.
+     * Call from tests to drive the [liveViewFrames] flow.
+     */
+    fun emitLiveViewFrame(jpeg: ByteArray) {
+        _liveViewFrames.tryEmit(jpeg)
     }
 
     // cancel-safe: no real suspension; returns immediately.
@@ -128,6 +144,13 @@ class FakeFujiNativeSdk : FujiNativeSdk {
         sessionId: SessionId,
         action: ShutterAction,
     ): Result<Unit> = Result.success(Unit)
+
+    // cancel-safe: callbackFlow/SharedFlow collection; cancellation stops collection cleanly.
+    // Frames are pushed via [emitLiveViewFrame]; latest-frame-wins via DROP_OLDEST buffer.
+    override fun liveViewFrames(
+        sessionId: SessionId,
+        liveViewFd: Int,
+    ): Flow<ByteArray> = _liveViewFrames.asSharedFlow()
 }
 
 // ─── FakeCameraRepository ─────────────────────────────────────────────────────

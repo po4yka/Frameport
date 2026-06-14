@@ -29,6 +29,34 @@ interface CameraWifiConnector {
     suspend fun release(handle: CameraNetworkHandle)
 
     /**
+     * Open, bind, and connect a TCP socket to the PTP-IP live-view channel endpoint
+     * (port [LIVEVIEW_CHANNEL_PORT] = 55742, master-constants.md §1 — `D9BE`),
+     * then hand off the duplicated fd to the caller for passing to the Rust layer.
+     *
+     * The live-view channel is opened LAZILY — only after the camera has been placed
+     * in live-view mode via SetFunctionMode (FunctionMode = 22 = IMAGE_LIVE_VIEW).
+     *
+     * fd ownership contract (identical to [openBoundSocket] / [openEventSocket]):
+     * The returned [OwnedSocketHandle.fd] is a dup of the underlying socket fd.
+     * Ownership transfers to the CALLER (Rust layer). Android has already closed its
+     * own socket reference separately. Rust closes its dup when done.
+     * See docs/rust/fd-ownership.md and ADR-0002.
+     *
+     * TCP socket config: TCP_NODELAY = true, SO_KEEPALIVE = true, 1 s connect timeout.
+     * Source: master-constants.md §1. [H] FCW, LFJ, FJH, XPN, XBL
+     *
+     * State transitions emitted during this call:
+     *   [CameraWifiState.LiveViewSocketRequested] → [CameraWifiState.LiveViewSocketBound]
+     *   → [CameraWifiState.LiveViewSocketHandedOff] on success
+     *   → [CameraWifiState.Error] on failure
+     *
+     * @param handle An active [CameraNetworkHandle] (same handle used for the command channel).
+     * @return [Result.success] with the owned, dup'd fd; [Result.failure] with a typed [CameraWifiError].
+     */
+    // cancel-safe: socket creation and connect are synchronous within withContext; cancellation closes the scope cleanly.
+    suspend fun openLiveViewSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle>
+
+    /**
      * Open, bind, and connect a second TCP socket to the PTP-IP event channel endpoint,
      * then hand off the duplicated fd to the caller for passing to the Rust layer.
      *
@@ -117,6 +145,38 @@ sealed class CameraWifiState {
      * Transitions back to [Connected] if the command channel is still active.
      */
     data object EventSocketReleased : CameraWifiState()
+
+    // ── Live-view channel socket states (M16) ────────────────────────────────
+    // Emitted by [CameraWifiConnector.openLiveViewSocket] during the lazy
+    // live-view channel handoff. Port 55742 (0xD9BE, master-constants.md §1).
+    // These run AFTER [Connected] and do not replace the command-channel state.
+
+    /**
+     * Android is creating and binding a socket for the PTP-IP live-view channel
+     * (port LIVEVIEW_CHANNEL_PORT = 55742, master-constants.md §1 — code D9BE).
+     * Only emitted after the camera has been placed in IMAGE_LIVE_VIEW mode
+     * (FunctionMode = 22).
+     * Source: transfer-liveview.md §6g, wifi-ptp-ip.md §LiveViewLater. [H] FCW, LFJ, FJH, XPN, XBL
+     */
+    data object LiveViewSocketRequested : CameraWifiState()
+
+    /**
+     * Live-view socket is bound to the camera network and connected to port 55742;
+     * fd is about to be dup'd for handoff to the Rust live-view read loop.
+     */
+    data object LiveViewSocketBound : CameraWifiState()
+
+    /**
+     * Dup'd live-view fd has been handed to the caller ([OwnedSocketHandle]).
+     * Ownership has transferred; the Rust LiveViewParser read loop now owns the fd.
+     */
+    data object LiveViewSocketHandedOff : CameraWifiState()
+
+    /**
+     * Live-view socket was released (session ended or error recovery).
+     * Transitions back to [Connected] if the command channel is still active.
+     */
+    data object LiveViewSocketReleased : CameraWifiState()
 }
 
 /**

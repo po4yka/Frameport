@@ -70,7 +70,10 @@ fun FrameportNavHost(
                     }
 
                     FrameportDestination.LiveView -> {
-                        LiveViewRoute()
+                        // TODO(frameport): extract sessionId and liveViewFd from nav args when
+                        // the connection → liveview handoff is wired in M16.
+                        // Stub values: sessionId=-1 (no-op session), liveViewFd=-1 (no socket).
+                        LiveViewRoute(sessionId = -1L, liveViewFd = -1)
                     }
 
                     FrameportDestination.Diagnostics -> {

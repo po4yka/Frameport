@@ -153,6 +153,30 @@ class JniNativeFujiSdk(
             fallbackCall = { fallback.cancelTransfer(transferId) },
         )
 
+    override fun nativeLiveViewStart(
+        sessionId: Long,
+        liveViewFd: Int,
+        callback: LiveViewFrameCallback,
+    ): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni
+                    .nativeLiveViewStart(sessionId, liveViewFd, callback)
+                    .toUnitResult("native_liveview_start")
+            },
+            fallbackCall = { fallback.nativeLiveViewStart(sessionId, liveViewFd, callback) },
+        )
+
+    override fun nativeLiveViewStop(sessionId: Long): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni
+                    .nativeLiveViewStop(sessionId)
+                    .toUnitResult("native_liveview_stop")
+            },
+            fallbackCall = { fallback.nativeLiveViewStop(sessionId) },
+        )
+
     private fun <T> callOrFallback(
         nativeCall: () -> T,
         fallbackCall: () -> T,

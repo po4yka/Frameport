@@ -150,6 +150,43 @@ interface FujiNativeSdk {
     suspend fun cancelTransfer(transferId: TransferId)
 
     /**
+     * Open a live-view frame stream for the given session.
+     *
+     * Returns a cold [Flow<ByteArray>] where each emission is a complete JPEG frame
+     * (SOI … EOI inclusive) parsed by the Rust zero-alloc live-view parser.
+     *
+     * Backpressure / latest-frame-wins contract:
+     * The underlying [kotlinx.coroutines.channels.callbackFlow] uses
+     * [BufferOverflow.DROP_OLDEST] so the read loop in Rust is never blocked on a
+     * slow Compose consumer. Callers MUST NOT assume every frame is delivered — only
+     * the most recent frame is guaranteed at any point.
+     *
+     * fd ownership contract:
+     * [liveViewFd] is an Android-owned, dup'd raw socket fd already bound to the
+     * camera network and connected to port 55742 (LIVEVIEW_CHANNEL_PORT,
+     * master-constants.md §1). Ownership transfers to Rust when [nativeLiveViewStart]
+     * is called inside this flow. Rust closes its copy when the session stops.
+     * Android MUST NOT close or use this fd after passing it here.
+     * See docs/rust/fd-ownership.md and ADR-0002.
+     *
+     * Lifecycle:
+     * Collecting the flow calls [nativeLiveViewStart]; [awaitClose] calls
+     * [nativeLiveViewStop]. Cancelling the collector cancels the flow and stops the
+     * Rust read loop.
+     *
+     * @param sessionId Active PTP-IP session.
+     * @param liveViewFd Android-owned, dup'd fd for the live-view socket (port 55742).
+     * @return Cold [Flow<ByteArray>] of JPEG frames. Latest-frame-wins; frames may be dropped.
+     */
+    // cancel-safe: callbackFlow with awaitClose; cancellation triggers awaitClose block
+    // which calls nativeLiveViewStop. The Rust stop flag is set atomically; the worker
+    // thread drains and exits. No shared mutable state is mutated after cancellation.
+    fun liveViewFrames(
+        sessionId: SessionId,
+        liveViewFd: Int,
+    ): Flow<ByteArray>
+
+    /**
      * Send a remote shutter action to the camera over PTP-IP.
      *
      * Wire mapping (master-constants.md §3, docs/protocol/wifi-ptp-ip.md):
@@ -209,4 +246,59 @@ interface DiagnosticsRepository {
 
     // cancel-safe: emit into a buffered SharedFlow; never blocks.
     suspend fun recordEvent(event: DiagnosticEvent)
+}
+
+// ─── LiveViewUiState ──────────────────────────────────────────────────────────
+
+/**
+ * UI state machine for the live-view screen, consumed by
+ * `LiveviewViewModel` in `:feature:liveview`.
+ *
+ * Transitions (happy path):
+ * ```
+ * Idle → Connecting → Streaming(fps, dropCount) → Stopped
+ *   ↘ (any error) → Error(message)
+ * ```
+ *
+ * [Streaming.fps] is throttled to one update per second by the ViewModel.
+ * [Streaming.dropCount] mirrors `FrameStats.drop_count` from the Rust parser
+ * and is safe for diagnostic display (no PII).
+ *
+ * NOTE: [Error.message] must be a pre-redacted, PII-free string per
+ * `privacy-local-first.md`. Never pass raw IP addresses, filenames, or
+ * camera serial numbers as the message.
+ */
+sealed class LiveViewUiState {
+    /** No live-view session; initial and reset state. */
+    data object Idle : LiveViewUiState()
+
+    /** Socket is bound; waiting for the Rust read loop to emit the first frame. */
+    data object Connecting : LiveViewUiState()
+
+    /**
+     * Frames are being received and decoded.
+     *
+     * @param fps Frames per second, throttled to 1 Hz update rate by the ViewModel.
+     * @param dropCount Cumulative frames dropped by the Rust parser (FrameTooLarge).
+     *   Privacy-safe: a counter, not a filename or device identifier.
+     */
+    data class Streaming(
+        val fps: Float,
+        val dropCount: Long,
+    ) : LiveViewUiState()
+
+    /** The session was stopped cleanly by the user or because the camera disconnected. */
+    data object Stopped : LiveViewUiState()
+
+    /**
+     * An unrecoverable error terminated the live-view session.
+     *
+     * @param message Pre-redacted, PII-free error description. Must NOT contain
+     *   IP addresses, filenames, MAC addresses, or camera serial numbers.
+     *   Map typed [dev.po4yka.frameport.core.model.FrameportError] to a safe string
+     *   before constructing this state.
+     */
+    data class Error(
+        val message: String,
+    ) : LiveViewUiState()
 }

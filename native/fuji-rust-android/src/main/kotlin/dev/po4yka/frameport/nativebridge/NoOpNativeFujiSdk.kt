@@ -36,4 +36,12 @@ class NoOpNativeFujiSdk(
     ): Result<Unit> = Result.success(Unit)
 
     override fun cancelTransfer(transferId: Long): Result<Unit> = Result.success(Unit)
+
+    override fun nativeLiveViewStart(
+        sessionId: Long,
+        liveViewFd: Int,
+        callback: LiveViewFrameCallback,
+    ): Result<Unit> = Result.success(Unit)
+
+    override fun nativeLiveViewStop(sessionId: Long): Result<Unit> = Result.success(Unit)
 }

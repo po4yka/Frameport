@@ -7,3 +7,16 @@ publish.workspace = true
 
 [dependencies]
 fuji-core.workspace = true
+thiserror.workspace = true
+# tokio is used by the async read-loop helper (io-util for AsyncReadExt, rt + macros for
+# current-thread runtime in integration callers). The zero-alloc parser is fully sync and
+# does not depend on tokio directly; tokio is only required for the loop helper.
+tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
+
+[dev-dependencies]
+fuji-core.workspace = true
+# Integration tests (tests/error_paths.rs, tests/golden_frame.rs, tests/alloc_shim.rs)
+# use #[tokio::test] which requires the rt-multi-thread feature in addition to the rt
+# feature already present in [dependencies]. The test binary is a separate compilation
+# unit and must declare its own feature requirements.
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread"] }

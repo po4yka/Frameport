@@ -77,6 +77,20 @@ class FakeCameraWifiConnector : CameraWifiConnector {
     }
 
     // cancel-safe: no real suspension; state transitions are immediate.
+    override suspend fun openLiveViewSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle> {
+        val error = armedError
+        if (error != null) {
+            armedError = null
+            _state.value = CameraWifiState.Error(error)
+            return Result.failure(IllegalStateException("FakeCameraWifiConnector: armed error: $error"))
+        }
+        _state.value = CameraWifiState.LiveViewSocketRequested
+        _state.value = CameraWifiState.LiveViewSocketBound
+        _state.value = CameraWifiState.LiveViewSocketHandedOff
+        return Result.success(OwnedSocketHandle(armedFd))
+    }
+
+    // cancel-safe: no real suspension; state transitions are immediate.
     override suspend fun openEventSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle> {
         val error = armedError
         if (error != null) {

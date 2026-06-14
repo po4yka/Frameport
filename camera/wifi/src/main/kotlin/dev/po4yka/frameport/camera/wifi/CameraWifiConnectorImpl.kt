@@ -64,6 +64,13 @@ class CameraWifiConnectorImpl
             /** Event channel TCP port (0xD9BD). [H] FCW, LFJ, FJH, XPN, XBL — master-constants §1 */
             const val EVENT_CHANNEL_PORT = 55741
 
+            /**
+             * Live-view channel TCP port (0xD9BE). [H] FCW, LFJ, FJH, XPN, XBL — master-constants §1
+             * Opened LAZILY — only after the camera has been placed in IMAGE_LIVE_VIEW mode
+             * (FunctionMode = 22). See docs/protocol/transfer-liveview.md §6g.
+             */
+            const val LIVEVIEW_CHANNEL_PORT = 55742
+
             /** Non-blocking connect timeout in milliseconds. [H] FJH, LFJ, XPN — master-constants §1 */
             const val CONNECT_TIMEOUT_MS = 1000
 
@@ -348,6 +355,94 @@ class CameraWifiConnectorImpl
 
                 _state.value = CameraWifiState.EventSocketHandedOff
                 Timber.tag(TAG).d("openEventSocket: EventSocketHandedOff, fd=%d", ownedFd)
+
+                Result.success(OwnedSocketHandle(ownedFd))
+            }
+
+        // cancel-safe: socket creation and connect are synchronous within withContext; cancellation closes the scope cleanly.
+        override suspend fun openLiveViewSocket(handle: CameraNetworkHandle): Result<OwnedSocketHandle> =
+            withContext(ioDispatcher) {
+                // The live-view channel is opened LAZILY — only after the camera has been placed in
+                // IMAGE_LIVE_VIEW mode (FunctionMode = 22). Do NOT open this socket eagerly.
+                //
+                // LIVEVIEW_CHANNEL_PORT = 55742 (0xD9BE). [H] FCW, LFJ, FJH, XPN, XBL — master-constants §1
+                // Socket config: TCP_NODELAY=true, SO_KEEPALIVE=true, 1 s connect timeout (same as command/event channels).
+                val liveViewEndpoint =
+                    CameraEndpoint(
+                        host = CAMERA_AP_IP,
+                        port = LIVEVIEW_CHANNEL_PORT,
+                    )
+
+                _state.value = CameraWifiState.LiveViewSocketRequested
+                Timber
+                    .tag(TAG)
+                    .d("openLiveViewSocket: LiveViewSocketRequested -> host=[redacted]:%d", liveViewEndpoint.port)
+
+                val network = findNetwork(handle)
+                if (network == null) {
+                    val detail = "No active Network matching handle; network may have been lost"
+                    _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
+                    return@withContext Result.failure(IllegalStateException(detail))
+                }
+
+                val socket = Socket()
+                try {
+                    network.bindSocket(socket)
+                } catch (e: Exception) {
+                    val detail = "liveview-socket bindSocket failed: ${e.javaClass.simpleName}"
+                    Timber.tag(TAG).d("openLiveViewSocket: SocketBindFailed (%s)", detail)
+                    _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
+                    socket.close()
+                    return@withContext Result.failure(e)
+                }
+
+                _state.value = CameraWifiState.LiveViewSocketBound
+                Timber.tag(TAG).d("openLiveViewSocket: LiveViewSocketBound")
+
+                try {
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    socket.connect(InetSocketAddress(liveViewEndpoint.host, liveViewEndpoint.port), CONNECT_TIMEOUT_MS)
+                } catch (e: Exception) {
+                    val detail = "liveview-socket connect failed: ${e.javaClass.simpleName}"
+                    Timber.tag(TAG).d("openLiveViewSocket: SocketConnectFailed (%s)", detail)
+                    _state.value = CameraWifiState.Error(CameraWifiError.SocketConnectFailed(detail))
+                    socket.close()
+                    return@withContext Result.failure(e)
+                }
+
+                // DUP AND OWN (identical discipline to openEventSocket — M15 event-channel pattern):
+                // ParcelFileDescriptor.fromSocket(socket) wraps the socket's fd; detachFd() creates
+                // an independent owned duplicate transferred to the caller (Rust LiveViewParser read loop).
+                // Android must NOT close this fd; Rust owns it exclusively and closes it via JNI bridge
+                // when the live-view session stops.
+                // The underlying 'socket' object is closed below — Android does NOT retain the live-view
+                // socket because it does not keep the Network binding alive (the command channel socket
+                // in activeSocket already does that).
+                //
+                // fd ownership: caller (Rust LiveViewParser read loop) takes ownership; must close its copy.
+                // See: docs/rust/fd-ownership.md, docs/adr/0002-wifi-socket-fd-handoff.md §Socket Rules
+                val ownedFd =
+                    try {
+                        ParcelFileDescriptor.fromSocket(socket).detachFd()
+                    } catch (e: Exception) {
+                        val detail = "liveview-socket fd dup failed: ${e.javaClass.simpleName}"
+                        Timber.tag(TAG).d("openLiveViewSocket: UnexpectedError during fd handoff (%s)", detail)
+                        _state.value = CameraWifiState.Error(CameraWifiError.UnexpectedError(e))
+                        socket.close()
+                        return@withContext Result.failure(e)
+                    }
+
+                // Live-view socket is NOT stored in activeSocket — the command channel binding keeps the
+                // network alive. Close Android's own reference to the live-view socket now.
+                try {
+                    socket.close()
+                } catch (_: Exception) {
+                    // Best-effort; fd has already been dup'd and detached.
+                }
+
+                _state.value = CameraWifiState.LiveViewSocketHandedOff
+                Timber.tag(TAG).d("openLiveViewSocket: LiveViewSocketHandedOff, fd=%d", ownedFd)
 
                 Result.success(OwnedSocketHandle(ownedFd))
             }

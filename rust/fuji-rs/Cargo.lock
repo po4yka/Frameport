@@ -131,7 +131,9 @@ name = "fuji-ffi"
 version = "0.1.0"
 dependencies = [
  "fuji-core",
+ "fuji-liveview",
  "jni",
+ "tokio",
 ]
 
 [[package]]
@@ -139,6 +141,8 @@ name = "fuji-liveview"
 version = "0.1.0"
 dependencies = [
  "fuji-core",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
