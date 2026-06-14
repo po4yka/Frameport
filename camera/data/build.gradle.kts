@@ -41,7 +41,14 @@ dependencies {
     implementation(projects.native.fujiRustAndroid)
     implementation(projects.core.common)
     implementation(projects.core.model)
+    implementation(projects.core.storage)
+    implementation(libs.androidx.core)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.hilt.android)
     ksp(libs.androidx.hilt.compiler)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.mockk)
+    testImplementation(libs.turbine)
 }

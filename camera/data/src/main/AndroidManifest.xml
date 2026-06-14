@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Camera session foreground service permissions — merged into the application manifest at
+        build time.
+
+        FOREGROUND_SERVICE: base permission required to call startForeground() on all API levels.
+        FOREGROUND_SERVICE_CONNECTED_DEVICE: type-specific permission required on API 34+
+          (MissingForegroundServiceTypeException thrown without it).
+
+        CHANGE_WIFI_STATE is already declared in :camera:wifi and merges app-wide; it satisfies
+        the connectedDevice runtime prerequisite for Wi-Fi-path sessions. Do NOT re-declare it.
+
+        BLUETOOTH_CONNECT / BLUETOOTH_SCAN are declared in :camera:bluetooth and merge app-wide;
+        they satisfy the connectedDevice runtime prerequisite for BLE-path sessions.
+
+        DO NOT add android.intent.action.BOOT_COMPLETED — Frameport starts sessions only from
+        explicit user actions. Foreground services started from BOOT_COMPLETED receivers are
+        forbidden on API 35+. See: .claude/rules/android-foreground-service-lifecycle.md
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application>
+        <!--
+            Camera session foreground service.
+            foregroundServiceType="connectedDevice":
+              - Appropriate for active camera device link over Wi-Fi/BLE.
+              - No system-enforced timeout (unlike dataSync / mediaProcessing).
+              - Requires at least one of BLUETOOTH_CONNECT, CHANGE_WIFI_STATE, or
+                UsbManager.requestPermission() to be satisfied at startForeground() time on API 34+.
+            exported="false": only the app process may start this service.
+        -->
+        <service
+            android:name=".CameraSessionService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+    </application>
+
+</manifest>
