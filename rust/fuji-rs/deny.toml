@@ -1,0 +1,90 @@
+# cargo-deny 0.19.x configuration for the fuji-rs workspace.
+# Enforces: crates.io-only sources, approved licenses, no known-vulnerable
+# advisories, and controlled duplicate-crate policy.
+#
+# Run locally:
+#   cargo deny --manifest-path rust/fuji-rs/Cargo.toml check
+#
+# Note: cargo-deny does not accept --locked; the Cargo.lock pin is enforced
+# by the separate `cargo fetch --locked && git diff --exit-code Cargo.lock`
+# step in ci.yml.
+
+# ---------------------------------------------------------------------------
+# [advisories] — RustSec advisory database
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# Add RUSTSEC-YYYY-NNNN entries to `ignore` only after explicit human triage
+# documenting the rationale and accepted risk.  Never add entries to silence
+# an advisory without review.
+# ignore = []
+
+# ---------------------------------------------------------------------------
+# [licenses] — approved SPDX identifiers
+#
+# version = 2: any license NOT listed here causes a hard failure.
+# Each entry is annotated with the crate(s) in the tree that require it.
+# Do NOT add a license here unless `cargo deny list` confirms it appears
+# in the resolved dependency tree.
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+    # Workspace crates (fuji-*) and the majority of the dependency tree.
+    "Apache-2.0",
+
+    # Most crates offer MIT as an alternative or sole license.
+    "MIT",
+
+    # Apache-2.0 WITH LLVM-exception — wasi 0.11.1+wasi-snapshot-preview1.
+    # This is LLVM's standard exception that permits linking into non-LLVM
+    # binaries; it is more permissive than bare Apache-2.0.
+    "Apache-2.0 WITH LLVM-exception",
+
+    # Unicode-3.0 — unicode-ident 1.0.x (AND combination with MIT/Apache-2.0).
+    "Unicode-3.0",
+
+    # Unlicense — memchr, same-file, walkdir, winapi-util.
+    "Unlicense",
+]
+# BSD-2-Clause (zerocopy, zerocopy-derive), Zlib (foldhash) are NOT included
+# because cargo-deny resolves their OR chains to Apache-2.0 or MIT in this
+# tree.  Add them only if `cargo deny list` shows them as active selections.
+
+# ---------------------------------------------------------------------------
+# [bans] — duplicate-crate and forbidden-crate policy
+# ---------------------------------------------------------------------------
+[bans]
+# Warn on multiple versions rather than hard-deny, because some duplicates
+# are forced by pinned third-party dependencies (e.g. jni 0.21.1 pulls
+# thiserror 1.x while the workspace uses thiserror 2.x).  Upgrade to "deny"
+# once the tree is stable enough to enforce single-version invariants.
+multiple-versions = "warn"
+
+# Crates explicitly forbidden in this workspace.
+# Add entries here as policy is established (e.g. crates with known
+# supply-chain risk or incompatible licenses).
+deny = []
+
+# Known duplicate-version pairs forced by jni 0.21.1's transitive deps.
+# Each entry documents WHICH upstream dependency causes the skew, so the
+# skip can be removed when that dep is updated.
+skip = [
+    # jni 0.21.1 depends on thiserror 1.0.x; the workspace uses thiserror 2.x.
+    # Remove these two entries when jni is upgraded to a version that uses
+    # thiserror 2.x.
+    { name = "thiserror", version = "1" },
+    { name = "thiserror-impl", version = "1" },
+    # jni 0.21.1 (via its windows build path) depends on windows-sys 0.45.x;
+    # the rest of the tree (tokio, rustix, mio) uses windows-sys 0.61.x.
+    # Remove when jni is upgraded.
+    { name = "windows-sys", version = "0.45" },
+]
+
+# ---------------------------------------------------------------------------
+# [sources] — crates.io only; no git sources, no private registries
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

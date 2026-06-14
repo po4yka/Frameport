@@ -1,5 +1,7 @@
 # Compatibility Matrix
 
+Last updated: 2026-06-14
+
 ## Purpose
 
 Frameport must track camera compatibility conservatively. Compatibility depends on camera model, firmware version, Android device model, Android version, transport path, BLE behavior, Wi-Fi PTP-IP behavior, USB behavior later, media formats, remote control support, live-view support, and feature-specific quirks.
@@ -56,8 +58,16 @@ Do not use this file as marketing copy. It is an engineering and support documen
 
 | Camera | Firmware | BLE Scan | BLE Connect | BLE Handoff | Manual Wi-Fi | PTP-IP Session | Object List | Thumbnail | JPEG Import | HEIF Import | RAF Import | Remote Shutter | Live View | USB | Status | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Fujifilm X-T5 | Unknown / unverified | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Out of scope | Primary target | First hardware target; verify feature-by-feature before claiming support |
-| Other Fujifilm X/GFX cameras | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Out of scope | Experimental | Do not claim support until tested |
+| Fujifilm X-T5 | Unknown / unverified | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Unknown | Primary first-run target. No hardware testing has been performed yet. Every feature column must be verified independently on real hardware before any status is upgraded from Unknown. Firmware version must be recorded at time of first test. |
+| Other Fujifilm X/GFX cameras | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Out of scope | Unknown | Do not claim support until tested on real hardware. |
+
+## Android Reference Devices
+
+This table records the Android devices intended for integration testing. These are not cameras. Entries here track platform-layer verification — socket handoff, PTP-IP session establishment, and import pipeline — independently of camera-model support.
+
+| Android Device | Android Version | Wi-Fi Socket Handoff | PTP-IP Session Open | Notes |
+|---|---|---|---|---|
+| Google Pixel (generation TBD) | TBD | Unknown | Unknown | Intended CI and primary integration-test device. Results to be recorded after first hardware run. No specific Pixel generation or Android version confirmed yet. |
 
 ## Geotagging Compatibility Matrix
 

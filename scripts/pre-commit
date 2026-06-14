@@ -1,0 +1,60 @@
+#!/bin/sh
+# pre-commit — golden-bless discipline guard
+#
+# This is the CHECKED-IN hook source.  It is NOT executed directly from here.
+# Install it with:  sh scripts/install-hooks.sh
+#
+# Two guards, both exit with code 2 on block (not 1, not 0).
+#
+# Guard 1: FRAMEPORT_BLESS_GOLDENS=1 in the environment is forbidden in any
+#          automated or agentic context.  It may only be invoked by a human
+#          reviewer with explicit rationale.
+#
+# Guard 2: Any staged path under tests/golden/ or src/test/resources/golden/
+#          requires the commit message to contain one of the words:
+#            intentional | behavioral | approve-bless
+#          If the rationale is absent the commit is blocked.
+#
+# Authority: .claude/rules/golden-bless-discipline.md
+
+# ---------------------------------------------------------------------------
+# Guard 1 — FRAMEPORT_BLESS_GOLDENS=1 detection
+# ---------------------------------------------------------------------------
+if [ "${FRAMEPORT_BLESS_GOLDENS}" = "1" ]; then
+    echo "BLOCKED: FRAMEPORT_BLESS_GOLDENS=1 is forbidden in automated context." >&2
+    echo "See .claude/rules/golden-bless-discipline.md for the approved procedure." >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Guard 2 — golden path staged without intentional-change rationale
+# ---------------------------------------------------------------------------
+GOLDEN_STAGED=$(git diff --cached --name-only 2>/dev/null \
+    | grep -E '(tests/golden/|src/test/resources/golden/)' \
+    | head -1)
+
+if [ -n "${GOLDEN_STAGED}" ]; then
+    # Try to read the commit message being composed.  Git pre-commit hooks run
+    # before the message is written to COMMIT_EDITMSG, so we check both the
+    # file (in case of --amend or a re-run) and fall back to an empty string.
+    MSG_FILE="${GIT_DIR:-.git}/COMMIT_EDITMSG"
+    if [ -f "${MSG_FILE}" ]; then
+        COMMIT_MSG=$(cat "${MSG_FILE}")
+    else
+        COMMIT_MSG=""
+    fi
+
+    if ! printf '%s' "${COMMIT_MSG}" | grep -qE '(intentional|behavioral|approve-bless)'; then
+        echo "BLOCKED: golden diff without intentional-change rationale in commit message." >&2
+        echo "" >&2
+        echo "Staged golden path: ${GOLDEN_STAGED}" >&2
+        echo "" >&2
+        echo "Your commit message must contain at least one of:" >&2
+        echo "  intentional | behavioral | approve-bless" >&2
+        echo "" >&2
+        echo "See .claude/rules/golden-bless-discipline.md for the required format." >&2
+        exit 2
+    fi
+fi
+
+exit 0

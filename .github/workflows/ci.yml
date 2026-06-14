@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_TERM_COLOR: always
+      # cargo clippy, cargo test, and cargo fetch use --locked to prevent silent
+      # dependency drift.  cargo fmt does not accept --locked (it only formats
+      # source files and never resolves dependencies); cargo deny does not
+      # accept --locked either — lock-drift is caught by the dedicated
+      # "Cargo.lock drift check" step.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Read the pinned Rust channel from the workspace toolchain file so the
+      # CI always matches the file — never a hardcoded version string here.
+      - name: Read Rust channel from rust-toolchain.toml
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel' rust/fuji-rs/rust-toolchain.toml \
+            | head -1 \
+            | sed 's/.*=\s*"\(.*\)"/\1/')
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt,clippy
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fuji-rs
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # -----------------------------------------------------------------------
+      # Rust gates
+      # -----------------------------------------------------------------------
+
+      - name: cargo fmt --check
+        working-directory: rust/fuji-rs
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: rust/fuji-rs
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        working-directory: rust/fuji-rs
+        run: cargo test --workspace --locked
+
+      - name: Cargo.lock drift check
+        working-directory: rust/fuji-rs
+        run: |
+          cargo fetch --locked
+          git diff --exit-code Cargo.lock || {
+            echo "::error::Cargo.lock drift detected. Run cargo update in its own PR."
+            exit 1
+          }
+
+      # -----------------------------------------------------------------------
+      # Android / Gradle gates
+      # -----------------------------------------------------------------------
+
+      - name: ./gradlew test
+        run: ./gradlew test
+
+      - name: ./gradlew lint
+        run: ./gradlew lint
+
+      - name: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug

@@ -1,0 +1,70 @@
+name: Miri (nightly, scheduled)
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC.
+    - cron: "0 2 * * *"
+
+# Non-gating: Miri failures are surfaced via the job summary but do not block
+# PRs.  They must be investigated promptly — UB in fuji-ptp / fuji-ptpip is a
+# correctness defect, not a lint warning.
+
+jobs:
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    env:
+      MIRIFLAGS: -Zmiri-strict-provenance
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri,rust-src
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fuji-rs
+
+      - name: miri test — fuji-ptp
+        id: miri_ptp
+        working-directory: rust/fuji-rs
+        run: cargo +nightly miri test -p fuji-ptp --locked
+        continue-on-error: true
+
+      - name: miri test — fuji-ptpip
+        id: miri_ptpip
+        working-directory: rust/fuji-rs
+        run: cargo +nightly miri test -p fuji-ptpip --locked
+        continue-on-error: true
+
+      - name: Write job summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ptp    = '${{ steps.miri_ptp.outcome }}';
+            const ptpip  = '${{ steps.miri_ptpip.outcome }}';
+            const icon   = (s) => s === 'success' ? '✅' : '❌';
+            const lines  = [
+              '## Miri results',
+              '',
+              `| Crate | Outcome |`,
+              `|---|---|`,
+              `| fuji-ptp   | ${icon(ptp)}  \`${ptp}\`   |`,
+              `| fuji-ptpip | ${icon(ptpip)} \`${ptpip}\` |`,
+              '',
+            ];
+            if (ptp !== 'success' || ptpip !== 'success') {
+              lines.push(
+                '> **Action required:** Miri detected a potential issue.',
+                '> Investigate before merging any code that touches these crates.',
+              );
+            }
+            await core.summary.addRaw(lines.join('\n')).write();
