@@ -187,6 +187,46 @@ interface FujiNativeSdk {
     ): Flow<ByteArray>
 
     /**
+     * Open a USB PTP session for a camera device connected over UsbManager.
+     *
+     * Called by [CameraUsbConnector] after [Os.dup] on [UsbDeviceConnection.fileDescriptor].
+     * Rust registers the dup'd fd in USB_SESSIONS and returns a new session id.
+     *
+     * fd ownership contract:
+     * [usbFd] is an Android-produced dup of the [UsbDeviceConnection.fileDescriptor].
+     * // OWNERSHIP: Android keeps + closes the original via UsbDeviceConnection.close().
+     * //            Rust owns + closes the dup via OwnedFd on Drop in fuji-ffi.
+     * [descriptors] are the raw USB interface descriptor bytes used by Rust to identify
+     * bulk-IN and bulk-OUT endpoints (no alignment guarantee; Rust validates every
+     * length field before indexing). Android may free the ByteArray after this call.
+     *
+     * @param usbFd Dup'd raw fd for the USB device. Ownership transfers to Rust.
+     * @param descriptors Raw USB interface descriptor bytes for endpoint discovery.
+     * @return [Result.success] with the Rust-assigned [SessionId]; [Result.failure] on error.
+     *
+     * cancel-safe: single withContext call wrapping the JNI bridge; no shared mutable
+     * state is mutated after cancellation.
+     */
+    suspend fun openUsbSession(
+        usbFd: Int,
+        descriptors: ByteArray,
+    ): Result<SessionId>
+
+    /**
+     * Close a USB PTP session previously opened via [openUsbSession].
+     *
+     * Rust removes the session from USB_SESSIONS and the OwnedFd is dropped,
+     * closing the dup. Android closes the original [UsbDeviceConnection] separately.
+     *
+     * Idempotent: closing an unknown session id is a no-op.
+     *
+     * cancel-safe: single withContext call; no shared mutable state mutated after cancellation.
+     *
+     * @param sessionId The [SessionId] returned by [openUsbSession].
+     */
+    suspend fun closeUsbSession(sessionId: SessionId)
+
+    /**
      * Send a remote shutter action to the camera over PTP-IP.
      *
      * Wire mapping (master-constants.md §3, docs/protocol/wifi-ptp-ip.md):

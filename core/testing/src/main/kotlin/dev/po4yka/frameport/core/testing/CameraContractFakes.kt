@@ -151,6 +151,42 @@ class FakeFujiNativeSdk : FujiNativeSdk {
         sessionId: SessionId,
         liveViewFd: Int,
     ): Flow<ByteArray> = _liveViewFrames.asSharedFlow()
+
+    // cancel-safe: no real suspension; returns stub session id.
+    // Control API: call [setUsbSessionId] to override the returned id; call [failUsbOpen] to arm a failure.
+    override suspend fun openUsbSession(
+        usbFd: Int,
+        descriptors: ByteArray,
+    ): Result<SessionId> {
+        val err = usbOpenError
+        if (err != null) {
+            usbOpenError = null
+            return Result.failure(FrameportErrorException(err))
+        }
+        return Result.success(nextUsbSessionId)
+    }
+
+    // cancel-safe: no real suspension; records call.
+    override suspend fun closeUsbSession(sessionId: SessionId) {
+        closedUsbSessions.add(sessionId)
+    }
+
+    // ─── USB control API ─────────────────────────────────────────────────────
+
+    private var nextUsbSessionId: SessionId = SessionId(99L)
+    private var usbOpenError: FrameportError? = null
+
+    val closedUsbSessions = mutableListOf<SessionId>()
+
+    /** Override the [SessionId] returned by the next [openUsbSession] call. */
+    fun setUsbSessionId(sessionId: SessionId) {
+        nextUsbSessionId = sessionId
+    }
+
+    /** Arm a failure for the next [openUsbSession] call. */
+    fun failUsbOpen(error: FrameportError) {
+        usbOpenError = error
+    }
 }
 
 // ─── FakeCameraRepository ─────────────────────────────────────────────────────

@@ -132,6 +132,7 @@ version = "0.1.0"
 dependencies = [
  "fuji-core",
  "fuji-liveview",
+ "fuji-usb-ptp",
  "jni",
  "tokio",
 ]
@@ -191,6 +192,9 @@ name = "fuji-usb-ptp"
 version = "0.1.0"
 dependencies = [
  "fuji-core",
+ "fuji-ptp",
+ "fuji-transfer",
+ "libc",
 ]
 
 [[package]]

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        USB host-mode feature declaration.
+        android:required="false": the app works without USB hardware; USB import is an
+        optional capability. Omitting this or setting required="true" would restrict
+        distribution to devices with USB host hardware.
+
+        NO root permission. NO /dev/bus/usb. NO shell commands.
+        NO NEARBY_WIFI_DEVICES. NO location permission anywhere in the USB flow.
+        See: CLAUDE.md Hard Boundaries, .claude/rules/android-foreground-service-types.md
+    -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
+    <!--
+        FOREGROUND_SERVICE: base permission required to call startForeground() on all API levels.
+        FOREGROUND_SERVICE_CONNECTED_DEVICE: type-specific permission required on API 34+.
+        These are normal permissions (auto-granted); declared here so the USB module contributes
+        them via manifest merge. The base FOREGROUND_SERVICE may already be declared by
+        :camera:data; duplicate declarations are harmless after manifest merge.
+
+        The connectedDevice type prerequisite on API 34+ requires at least one of:
+          - BLUETOOTH_CONNECT / BLUETOOTH_SCAN (already declared in :camera:bluetooth)
+          - CHANGE_WIFI_STATE (already declared in :camera:wifi)
+          - UsbManager.requestPermission() successfully called
+        The third prerequisite is satisfied by the USB permission flow in AndroidCameraUsbConnector.
+
+        See: .claude/rules/android-foreground-service-types.md
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+</manifest>

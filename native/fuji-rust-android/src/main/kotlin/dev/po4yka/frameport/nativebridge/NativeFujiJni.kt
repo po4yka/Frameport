@@ -88,5 +88,40 @@ class NativeFujiJni private constructor() {
          */
         @JvmStatic
         external fun nativeLiveViewStop(sessionId: Long): Int
+
+        /**
+         * Open a USB PTP session for a camera device connected over UsbManager.
+         *
+         * fd ownership contract:
+         * [fd] is an Android-produced dup of [UsbDeviceConnection.fileDescriptor].
+         * // OWNERSHIP: Android keeps + closes the original via UsbDeviceConnection.close().
+         * //            Rust owns + closes the dup via OwnedFd on Drop in fuji-ffi.
+         * [descriptors] are raw USB interface descriptor bytes; Rust validates every
+         * length field before indexing (no alignment guarantee on ByteArray from JVM).
+         *
+         * Returns a positive session id (Long > 0) on success, or a negative ERR_*
+         * sentinel on failure. On panic, throws [NativeException] and returns [ERR_PANIC].
+         *
+         * @param fd      Dup'd raw fd for the USB device. Ownership transfers to Rust.
+         * @param descriptors Raw USB interface descriptor bytes for endpoint discovery.
+         */
+        @JvmStatic
+        external fun nativeUsbSessionOpen(
+            fd: Int,
+            descriptors: ByteArray,
+        ): Long
+
+        /**
+         * Close a USB PTP session previously opened via [nativeUsbSessionOpen].
+         *
+         * Rust drops the OwnedFd (closing the dup) and removes the session from
+         * USB_SESSIONS. Idempotent: unknown session ids return [OK].
+         *
+         * Returns [OK] (0) on success, or [ERR_PANIC] + [NativeException] on panic.
+         *
+         * @param sessionId Session id returned by [nativeUsbSessionOpen].
+         */
+        @JvmStatic
+        external fun nativeUsbSessionClose(sessionId: Long): Int
     }
 }

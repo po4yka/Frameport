@@ -177,6 +177,32 @@ class JniNativeFujiSdk(
             fallbackCall = { fallback.nativeLiveViewStop(sessionId) },
         )
 
+    override fun openUsbSession(
+        fd: Int,
+        descriptors: ByteArray,
+    ): Result<Long> =
+        callResultOrFallback(
+            nativeCall = {
+                val sessionId = NativeFujiJni.nativeUsbSessionOpen(fd, descriptors)
+                if (sessionId > 0L) {
+                    Result.success(sessionId)
+                } else {
+                    Result.failure(
+                        IllegalStateException("native_usb_session_open failed with code $sessionId"),
+                    )
+                }
+            },
+            fallbackCall = { fallback.openUsbSession(fd, descriptors) },
+        )
+
+    override fun closeUsbSession(sessionId: Long): Result<Unit> =
+        callResultOrFallback(
+            nativeCall = {
+                NativeFujiJni.nativeUsbSessionClose(sessionId).toUnitResult("native_usb_session_close")
+            },
+            fallbackCall = { fallback.closeUsbSession(sessionId) },
+        )
+
     private fun <T> callOrFallback(
         nativeCall: () -> T,
         fallbackCall: () -> T,

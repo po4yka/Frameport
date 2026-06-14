@@ -44,4 +44,11 @@ class NoOpNativeFujiSdk(
     ): Result<Unit> = Result.success(Unit)
 
     override fun nativeLiveViewStop(sessionId: Long): Result<Unit> = Result.success(Unit)
+
+    override fun openUsbSession(
+        fd: Int,
+        descriptors: ByteArray,
+    ): Result<Long> = Result.success(-1L)
+
+    override fun closeUsbSession(sessionId: Long): Result<Unit> = Result.success(Unit)
 }

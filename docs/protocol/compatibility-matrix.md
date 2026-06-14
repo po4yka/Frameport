@@ -58,7 +58,7 @@ Do not use this file as marketing copy. It is an engineering and support documen
 
 | Camera | Firmware | BLE Scan | BLE Connect | BLE Handoff | Manual Wi-Fi | PTP-IP Session | Object List | Thumbnail | JPEG Import | HEIF Import | RAF Import | Remote Shutter | Live View | USB | Status | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Fujifilm X-T5 | Unknown / unverified | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Experimental | Unknown | Out of scope | Unknown | Primary first-run target. No hardware testing has been performed yet. Every feature column must be verified independently on real hardware before any status is upgraded from Unknown. Firmware version must be recorded at time of first test. Remote Shutter is Experimental, not Supported: M15 implemented the BLE and PTP-IP remote-shutter paths, verified by the fuji-sim RemoteScenario and JVM unit tests only — not yet confirmed against real hardware. |
+| Fujifilm X-T5 | Unknown / unverified | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Experimental | Unknown | Experimental | Unknown | Primary first-run target. No hardware testing has been performed yet. Every feature column must be verified independently on real hardware before any status is upgraded from Unknown. Firmware version must be recorded at time of first test. Remote Shutter is Experimental, not Supported: M15 implemented the BLE and PTP-IP remote-shutter paths, verified by the fuji-sim RemoteScenario and JVM unit tests only — not yet confirmed against real hardware. USB is Experimental, not Supported: M17 implemented the USB PTP transport (fuji-usb-ptp BulkTransport + UsbPtpSession + CommandTransport impl), the Android UsbManager permission flow (AndroidCameraUsbConnector), and the UsbSessionViewModel; verified by FakeCameraUsbConnector JVM unit tests only — not yet validated on real hardware. No USB serial numbers, descriptors, or hardware identifiers were observed. |
 | Other Fujifilm X/GFX cameras | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Out of scope | Out of scope | Unknown | Do not claim support until tested on real hardware. |
 
 ## Android Reference Devices
@@ -159,7 +159,7 @@ Current unknowns:
 - Whether live-view frame format and channel behavior differ by model.
 - Whether Android OEM Wi-Fi routing behavior affects camera connection reliability.
 - Whether Android OEM BLE stack behavior affects reconnect reliability.
-- USB behavior is not part of v1 and remains unverified.
+- USB PTP transport and UsbManager permission flow implemented (M17) and unit-tested via FakeCameraUsbConnector / fake UsbManager seam; not yet validated on real hardware. USB column upgraded from Out of scope to Experimental for X-T5 pending first hardware run.
 - Firmware update is out of scope for v1.
 - Cloud/account sync is out of scope for v1.
 ```

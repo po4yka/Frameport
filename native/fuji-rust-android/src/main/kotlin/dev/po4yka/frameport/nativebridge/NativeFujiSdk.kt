@@ -109,6 +109,36 @@ interface NativeFujiSdk {
      * @return [Result.success] on clean stop; [Result.failure] on panic (ERR_PANIC).
      */
     fun nativeLiveViewStop(sessionId: Long): Result<Unit>
+
+    /**
+     * Open a USB PTP session for a camera device connected over UsbManager.
+     *
+     * fd ownership contract:
+     * [fd] is an Android-produced dup of [UsbDeviceConnection.fileDescriptor].
+     * // OWNERSHIP: Android keeps + closes the original via UsbDeviceConnection.close().
+     * //            Rust owns + closes the dup via OwnedFd on Drop in fuji-ffi.
+     * [descriptors] are raw USB interface descriptor bytes; Rust validates every
+     * length field before indexing (no alignment guarantee on ByteArray from JVM).
+     *
+     * @param fd Dup'd raw fd for the USB device. Ownership transfers to Rust.
+     * @param descriptors Raw USB interface descriptor bytes for endpoint discovery.
+     * @return [Result.success] with the Rust-assigned session id; [Result.failure] on error.
+     */
+    fun openUsbSession(
+        fd: Int,
+        descriptors: ByteArray,
+    ): Result<Long>
+
+    /**
+     * Close a USB PTP session previously opened via [openUsbSession].
+     *
+     * Rust drops the OwnedFd (closing the dup) and removes the session from
+     * USB_SESSIONS. Idempotent: unknown session ids return [Result.success].
+     *
+     * @param sessionId Session id returned by [openUsbSession].
+     * @return [Result.success] on clean close; [Result.failure] on panic (ERR_PANIC).
+     */
+    fun closeUsbSession(sessionId: Long): Result<Unit>
 }
 
 data class NativeCameraSession(

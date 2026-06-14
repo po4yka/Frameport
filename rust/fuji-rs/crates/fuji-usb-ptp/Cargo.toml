@@ -7,3 +7,6 @@ publish.workspace = true
 
 [dependencies]
 fuji-core.workspace = true
+fuji-ptp.workspace = true
+fuji-transfer.workspace = true
+libc.workspace = true

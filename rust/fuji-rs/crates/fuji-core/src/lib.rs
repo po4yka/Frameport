@@ -678,6 +678,41 @@ pub enum BleProtocolError {
     LocationPayloadUnsupported,
 }
 
+/// USB PTP host-mode transport errors.
+///
+/// Source: error-model.md `Usb.*` family (Android host-mode, UsbManager path).
+/// Android owns all UsbManager permission/fd lifecycle; Rust owns PTP codec and
+/// bulk transfer state. These variants cover errors observable inside the Rust
+/// transport layer after the fd has been handed off by Android.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq, Hash)]
+pub enum UsbError {
+    /// USB descriptor bytes supplied by Android are malformed, too short, or
+    /// contain an invalid length field. Never index past validated length.
+    #[error("usb:descriptor-invalid")]
+    DescriptorInvalid,
+    /// A bulk-IN read from the device failed (OS or device error after fd handoff).
+    #[error("usb:bulk-read-failed")]
+    BulkReadFailed,
+    /// A bulk-OUT write to the device failed (OS or device error after fd handoff).
+    #[error("usb:bulk-write-failed")]
+    BulkWriteFailed,
+    /// The USB device was physically detached while a session was active.
+    #[error("usb:device-detached")]
+    DeviceDetached,
+    /// No suitable bulk-IN or bulk-OUT endpoint was found in the descriptor.
+    #[error("usb:endpoint-not-found")]
+    EndpointNotFound,
+    /// A PTP transaction failed (command, optional-data, or response phase mismatch).
+    #[error("usb:transaction-failed")]
+    TransactionFailed,
+    /// The USB session fd supplied by Android is not a valid open file descriptor.
+    #[error("usb:invalid-fd")]
+    InvalidFd,
+    /// A bulk transfer was interrupted by a cancellation signal (AtomicBool stop flag).
+    #[error("usb:transfer-cancelled")]
+    TransferCancelled,
+}
+
 // ─── Top-level FujiError ───────────────────────────────────────────────────────
 
 /// The top-level error type for the Frameport native SDK.
@@ -721,6 +756,8 @@ pub enum FujiError {
     Native(#[from] NativeError),
     #[error(transparent)]
     BleProtocol(#[from] BleProtocolError),
+    #[error(transparent)]
+    Usb(#[from] UsbError),
 }
 
 pub type FujiResult<T> = Result<T, FujiError>;
@@ -1093,6 +1130,19 @@ mod tests {
         check_variant!(NativeError::UnsupportedAbi, "NativeError::UnsupportedAbi");
     }
 
+    // UsbError — all 8 variants
+    #[test]
+    fn redaction_usb_error() {
+        check_variant!(UsbError::DescriptorInvalid, "UsbError::DescriptorInvalid");
+        check_variant!(UsbError::BulkReadFailed, "UsbError::BulkReadFailed");
+        check_variant!(UsbError::BulkWriteFailed, "UsbError::BulkWriteFailed");
+        check_variant!(UsbError::DeviceDetached, "UsbError::DeviceDetached");
+        check_variant!(UsbError::EndpointNotFound, "UsbError::EndpointNotFound");
+        check_variant!(UsbError::TransactionFailed, "UsbError::TransactionFailed");
+        check_variant!(UsbError::InvalidFd, "UsbError::InvalidFd");
+        check_variant!(UsbError::TransferCancelled, "UsbError::TransferCancelled");
+    }
+
     // BleProtocolError — all 9 variants
     #[test]
     fn redaction_ble_protocol_error() {
@@ -1184,6 +1234,7 @@ mod tests {
             FujiError::BleProtocol(BleProtocolError::MalformedPayload),
             "FujiError::BleProtocol"
         );
+        check_variant!(FujiError::Usb(UsbError::BulkReadFailed), "FujiError::Usb");
     }
 
     // ── FunctionMode discriminants ─────────────────────────────────────────────

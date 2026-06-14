@@ -1,13 +1,21 @@
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.ksp)
 }
 
 android {
     namespace = "dev.po4yka.frameport.camera.usb"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
-        minSdk = libs.versions.minSdk.get().toInt()
+        minSdk =
+            libs.versions.minSdk
+                .get()
+                .toInt()
     }
 
     compileOptions {
@@ -24,5 +32,19 @@ android {
 
 dependencies {
     implementation(projects.core.model)
+    implementation(projects.core.common)
+    implementation(projects.camera.api)
+    implementation(projects.camera.domain)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.hilt.android)
+    implementation(libs.androidx.core)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.timber)
+    ksp(libs.androidx.hilt.compiler)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.mockk)
+    testImplementation(libs.turbine)
+    testImplementation(projects.core.testing)
 }

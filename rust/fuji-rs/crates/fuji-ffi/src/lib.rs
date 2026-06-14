@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use fuji_core::SDK_VERSION;
 use fuji_liveview::{LiveViewParser, run_liveview_loop};
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use fuji_usb_ptp::UsbPtpSession;
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 use jni::sys::{jbyteArray, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 
@@ -22,6 +23,12 @@ static SESSIONS: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
 /// Wi-Fi sessions: maps session ID -> dup'd OwnedFd for the command socket.
 /// Dropping an entry closes Rust's dup; Android keeps and closes the original.
 static WIFI_SESSIONS: Mutex<BTreeMap<i64, OwnedFd>> = Mutex::new(BTreeMap::new());
+/// USB sessions: maps session ID -> the live `UsbPtpSession` (owns the USB device fd).
+/// OWNERSHIP: Android keeps + closes the original UsbDeviceConnection fd. The fd handed
+///            to Rust is an Android `Os.dup()`; Rust takes exclusive ownership of that dup
+///            (no second dup) via the session's `BulkTransport`, and closes it when the
+///            `UsbPtpSession` is dropped on session close or shutdown.
+static USB_SESSIONS: Mutex<BTreeMap<i64, UsbPtpSession>> = Mutex::new(BTreeMap::new());
 /// Active transfer IDs. Populated by download operations once downstream is wired.
 static TRANSFERS: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
 
@@ -72,6 +79,14 @@ pub fn native_shutdown() -> i32 {
         }
         Err(_) => false,
     };
+    let usb_ok = match USB_SESSIONS.lock() {
+        Ok(mut u) => {
+            // Dropping each UsbPtpSession closes its BulkTransport fd (Rust's dup).
+            u.clear();
+            true
+        }
+        Err(_) => false,
+    };
     let transfers_ok = match TRANSFERS.lock() {
         Ok(mut t) => {
             t.clear();
@@ -99,7 +114,7 @@ pub fn native_shutdown() -> i32 {
         }
         Err(_) => false,
     };
-    if sessions_ok && wifi_ok && transfers_ok && liveview_ok {
+    if sessions_ok && wifi_ok && usb_ok && transfers_ok && liveview_ok {
         OK
     } else {
         ERR_PANIC
@@ -134,7 +149,12 @@ pub fn native_close_session(session_id: i64) -> i32 {
         Ok(mut wifi) => wifi.remove(&session_id).is_some(),
         Err(_) => return ERR_PANIC,
     };
-    if in_noop || in_wifi {
+    // Remove from usb map (dropping the UsbPtpSession closes Rust's dup of the USB fd).
+    let in_usb = match USB_SESSIONS.lock() {
+        Ok(mut usb) => usb.remove(&session_id).is_some(),
+        Err(_) => return ERR_PANIC,
+    };
+    if in_noop || in_wifi || in_usb {
         OK
     } else {
         ERR_INVALID_SESSION
@@ -172,6 +192,83 @@ pub fn native_open_wifi_session(command_fd: i32) -> i64 {
     }
 }
 
+/// Open a USB PTP session backed by an Android-supplied USB device fd.
+///
+/// # Fd ownership
+/// `usb_fd` is the Android `Os.dup()` of `UsbDeviceConnection.fileDescriptor`.
+/// // OWNERSHIP: Android keeps + closes the ORIGINAL via UsbDeviceConnection.close().
+/// //            Rust takes exclusive ownership of the dup (no second dup) — the dup
+/// //            lives in the stored UsbPtpSession and is closed on session close/shutdown.
+/// Android may close the `UsbDeviceConnection` independently; the dup remains valid.
+///
+/// `descriptor_bytes` is a copy of the raw USB interface descriptor bytes from Android.
+/// They are parsed by `fuji_usb_ptp::open_from_owned_fd`, which validates every `bLength`
+/// field before indexing and locates the PTP bulk-IN / bulk-OUT endpoint pair.
+///
+/// # Fd ownership (no double-dup)
+/// `usb_fd` is an Android `Os.dup()` of the `UsbDeviceConnection` fd; Android has
+/// transferred exclusive ownership of that dup to Rust. Rust does NOT dup again — it
+/// hands `usb_fd` straight to `open_from_owned_fd`, which wraps it in an `OwnedFd` and
+/// owns it for the lifetime of the returned `UsbPtpSession`. Rust is therefore
+/// responsible for closing `usb_fd` on EVERY path:
+/// - success: the fd lives in the stored `UsbPtpSession` and is closed on session close/shutdown;
+/// - `open_from_owned_fd` error: the fd is closed inside that call (its `OwnedFd` drops);
+/// - pre-call error here (`!INITIALIZED`): closed explicitly via `libc_close`.
+///
+/// Android closes only the ORIGINAL connection fd via `UsbDeviceConnection.close()`.
+///
+/// Returns the new session id (> 0) on success, or a negative ERR_* sentinel on failure.
+pub fn native_usb_session_open(usb_fd: i32, descriptor_bytes: &[u8]) -> i64 {
+    if !INITIALIZED.load(Ordering::SeqCst) {
+        // OWNERSHIP: Android transferred the dup; close it so it does not leak,
+        // since we never reach open_from_owned_fd.
+        if usb_fd >= 0 {
+            // SAFETY: usb_fd is the Android dup, owned by Rust and not yet wrapped.
+            unsafe { libc_close(usb_fd) };
+        }
+        return i64::from(ERR_NOT_INITIALIZED);
+    }
+    // open_from_owned_fd takes ownership of usb_fd and closes it on ALL of its
+    // error paths (invalid fd, malformed descriptor, missing endpoint). On Ok it
+    // owns the fd via the session's BulkTransport.
+    let session = match fuji_usb_ptp::open_from_owned_fd(usb_fd, descriptor_bytes) {
+        Ok(session) => session,
+        Err(_) => return i64::from(ERR_INVALID_SESSION),
+    };
+    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
+    match USB_SESSIONS.lock() {
+        Ok(mut usb) => {
+            usb.insert(session_id, session);
+            session_id
+        }
+        // On mutex poison, `session` drops at end of scope and closes the fd. No leak.
+        Err(_) => i64::from(ERR_PANIC),
+    }
+}
+
+/// Close a USB PTP session by id.
+///
+/// Drops the UsbPtpSession from USB_SESSIONS, which closes Rust's dup of the USB device fd.
+/// Android closes the original UsbDeviceConnection fd independently.
+///
+/// Idempotent: unknown session ids (not in USB_SESSIONS) return `OK`.
+///
+/// Returns `OK` (0) on success, or `ERR_PANIC` (-100) on mutex poison.
+pub fn native_usb_session_close(session_id: i64) -> i32 {
+    if session_id <= 0 {
+        // Idempotent: invalid id treated as already-closed.
+        return OK;
+    }
+    match USB_SESSIONS.lock() {
+        Ok(mut usb) => {
+            // Dropping the UsbPtpSession closes Rust's dup of the USB device fd.
+            let _ = usb.remove(&session_id);
+            OK
+        }
+        Err(_) => ERR_PANIC,
+    }
+}
+
 /// Internal error type for operations that can fail with mutex poison.
 #[derive(Debug, PartialEq)]
 pub struct InternalError;
@@ -194,7 +291,11 @@ pub fn native_list_media(session_id: i64) -> Result<Option<Vec<u8>>, InternalErr
         Ok(w) => w.contains_key(&session_id),
         Err(_) => return Err(InternalError),
     };
-    if in_noop || in_wifi {
+    let in_usb = match USB_SESSIONS.lock() {
+        Ok(u) => u.contains_key(&session_id),
+        Err(_) => return Err(InternalError),
+    };
+    if in_noop || in_wifi || in_usb {
         // TODO(frameport): encode a real MediaObjectList protobuf/CBOR payload
         // once fuji-transfer::list_media is wired through the JNI boundary.
         Ok(Some(Vec::new()))
@@ -224,8 +325,12 @@ pub fn native_get_thumbnail(
         Ok(w) => w.contains_key(&session_id),
         Err(_) => return Err(InternalError),
     };
-    if in_noop || in_wifi {
-        // TODO(frameport): call fuji-transfer::get_thumbnail once the PTP-IP
+    let in_usb = match USB_SESSIONS.lock() {
+        Ok(u) => u.contains_key(&session_id),
+        Err(_) => return Err(InternalError),
+    };
+    if in_noop || in_wifi || in_usb {
+        // TODO(frameport): call fuji-transfer::get_thumbnail once the PTP-IP/USB
         // client path is wired through the fd->session handle.
         Ok(Some(Vec::new()))
     } else {
@@ -255,7 +360,11 @@ pub fn native_download_object_to_fd(session_id: i64, _object_handle: i64, output
         Ok(w) => w.contains_key(&session_id),
         Err(_) => return ERR_PANIC,
     };
-    if !in_noop && !in_wifi {
+    let in_usb = match USB_SESSIONS.lock() {
+        Ok(u) => u.contains_key(&session_id),
+        Err(_) => return ERR_PANIC,
+    };
+    if !in_noop && !in_wifi && !in_usb {
         return ERR_INVALID_SESSION;
     }
     if output_fd < 0 {
@@ -805,6 +914,78 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
     }
 }
 
+// ---------------------------------------------------------------------------
+// JNI exports — USB PTP
+// ---------------------------------------------------------------------------
+
+/// Open a USB PTP session for a camera device connected over UsbManager.
+///
+/// `fd` must be an Android-produced dup of `UsbDeviceConnection.fileDescriptor` (>= 0).
+/// // OWNERSHIP: Android keeps + closes the original via UsbDeviceConnection.close().
+/// //            Rust owns + closes the dup via the UsbPtpSession stored in USB_SESSIONS.
+/// `descriptors` is a JVM byte[] containing the raw USB interface descriptor bytes;
+/// Rust copies the bytes out via `convert_byte_array` before returning, so the JVM
+/// is free to GC the array afterward.
+///
+/// Returns the session id (> 0) on success, or a negative ERR_* sentinel on expected
+/// failure. On panic, throws `NativeException` and returns `ERR_PANIC`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nativeUsbSessionOpen(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    fd: jint,
+    descriptors: JByteArray<'_>,
+) -> jlong {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // Convert the JVM byte[] to an owned Vec<u8> before any Rust logic runs.
+        // convert_byte_array copies bytes out; the JVM array is not pinned.
+        let descriptor_bytes: Vec<u8> = match env.convert_byte_array(&descriptors) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // OWNERSHIP: Android already transferred the dup'd fd to Rust. Since
+                // native_usb_session_open is never reached, close it here to avoid a leak.
+                if fd >= 0 {
+                    // SAFETY: fd is the Android dup, owned by Rust and not yet wrapped.
+                    unsafe { libc_close(fd) };
+                }
+                return i64::from(ERR_INVALID_SESSION);
+            }
+        };
+        native_usb_session_open(fd, &descriptor_bytes)
+    }));
+    match result {
+        Ok(id) => id as jlong,
+        Err(_) => {
+            throw_native(&mut env, "native panic in nativeUsbSessionOpen");
+            i64::from(ERR_PANIC) as jlong
+        }
+    }
+}
+
+/// Close a USB PTP session previously opened via `nativeUsbSessionOpen`.
+///
+/// Removes the UsbPtpSession from USB_SESSIONS (closing Rust's dup of the USB device fd).
+/// Android closes the original UsbDeviceConnection fd independently.
+///
+/// Idempotent: unknown session ids return `OK` (0) without error.
+///
+/// Returns `OK` (0) on success, or `ERR_PANIC` (-100) + `NativeException` on panic.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nativeUsbSessionClose(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    session_id: jlong,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| native_usb_session_close(session_id)));
+    match result {
+        Ok(code) => code as jint,
+        Err(_) => {
+            throw_native(&mut env, "native panic in nativeUsbSessionClose");
+            ERR_PANIC as jint
+        }
+    }
+}
+
 /// Close a raw file descriptor via libc. Used on error paths where an OwnedFd
 /// was converted to a raw fd via into_raw_fd() and must be closed manually.
 ///
@@ -840,6 +1021,7 @@ mod tests {
         INITIALIZED.store(false, Ordering::SeqCst);
         SESSIONS.lock().unwrap().clear();
         WIFI_SESSIONS.lock().unwrap().clear();
+        USB_SESSIONS.lock().unwrap().clear();
         TRANSFERS.lock().unwrap().clear();
     }
 

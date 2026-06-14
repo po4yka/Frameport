@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 fuji-core.workspace = true
 fuji-liveview.workspace = true
+fuji-usb-ptp.workspace = true
 jni.workspace = true
 # tokio: net (TcpStream::from_raw_fd), rt (current-thread runtime for worker thread),
 # io-util (AsyncReadExt), macros (tokio::main in tests), time (timeout on session close),

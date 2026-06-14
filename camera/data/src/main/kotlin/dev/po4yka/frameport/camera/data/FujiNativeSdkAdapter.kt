@@ -189,6 +189,27 @@ class FujiNativeSdkAdapter
                 .buffer(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
                 .flowOn(ioDispatcher)
 
+        // cancel-safe: single withContext wrapping the JNI bridge; no shared mutable state
+        // mutated after cancellation. The dup'd fd passed as usbFd is owned by Rust from this
+        // point; Android must not close it. See docs/rust/fd-ownership.md and ADR-0002.
+        override suspend fun openUsbSession(
+            usbFd: Int,
+            descriptors: ByteArray,
+        ): Result<SessionId> =
+            withContext(ioDispatcher) {
+                nativeFujiSdk
+                    .openUsbSession(usbFd, descriptors)
+                    .map { rawId -> SessionId(rawId) }
+                    .toTypedFailure()
+            }
+
+        // cancel-safe: single withContext call; no shared mutable state mutated after cancellation.
+        override suspend fun closeUsbSession(sessionId: SessionId) {
+            withContext(ioDispatcher) {
+                nativeFujiSdk.closeUsbSession(sessionId.value)
+            }
+        }
+
         // cancel-safe: single withContext; stub returns success; no shared state mutated after cancellation.
         // TODO(M16): wire to fuji-ffi JNI entry point for RemoteSession shutter command.
         @Suppress("UNUSED_PARAMETER")
