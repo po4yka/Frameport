@@ -6,6 +6,7 @@ import dev.po4yka.frameport.camera.api.CameraWifiCredentials
 import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.core.common.di.IoDispatcher
 import dev.po4yka.frameport.core.model.FrameportError
+import dev.po4yka.frameport.core.model.FrameportErrorException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -34,9 +35,10 @@ class OpenCameraSessionUseCase
                     onSuccess = { sessionId -> emit(CameraSessionState.SessionReady(sessionId)) },
                     onFailure = { throwable ->
                         val error: FrameportError =
-                            FrameportError.Unknown(
-                                throwable.message ?: "openSession failed with no message",
-                            )
+                            (throwable as? FrameportErrorException)?.error
+                                ?: FrameportError.Unknown(
+                                    throwable.message ?: "openSession failed",
+                                )
                         emit(CameraSessionState.Failed(error))
                     },
                 )

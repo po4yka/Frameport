@@ -17,6 +17,7 @@ import dev.po4yka.frameport.camera.api.TransferId
 import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.camera.api.TransferRepository
 import dev.po4yka.frameport.core.model.FrameportError
+import dev.po4yka.frameport.core.model.FrameportErrorException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -82,7 +83,7 @@ class FakeFujiNativeSdk : FujiNativeSdk {
         val err = openError
         if (err != null) {
             openError = null
-            return Result.failure(IllegalStateException(err.message))
+            return Result.failure(FrameportErrorException(err))
         }
         return Result.success(nextSessionId)
     }
@@ -97,7 +98,7 @@ class FakeFujiNativeSdk : FujiNativeSdk {
         val err = mediaError
         if (err != null) {
             mediaError = null
-            return Result.failure(IllegalStateException(err.message))
+            return Result.failure(FrameportErrorException(err))
         }
         return Result.success(mediaList)
     }
@@ -161,7 +162,7 @@ class FakeCameraRepository : CameraRepository {
         val err = failureError
         if (err != null) {
             _sessionState.value = CameraSessionState.Failed(err)
-            return Result.failure(IllegalStateException(err.message))
+            return Result.failure(FrameportErrorException(err))
         }
         val id = successSessionId ?: SessionId(1L)
         _sessionState.value = CameraSessionState.SessionReady(id)
@@ -202,7 +203,7 @@ class FakeMediaRepository : MediaRepository {
         val err = error
         if (err != null) {
             error = null
-            return Result.failure(IllegalStateException(err.message))
+            return Result.failure(FrameportErrorException(err))
         }
         return Result.success(mediaList)
     }

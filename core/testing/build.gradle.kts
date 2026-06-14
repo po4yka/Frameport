@@ -8,6 +8,7 @@ kotlin {
 
 dependencies {
     implementation(projects.camera.api)
+    implementation(projects.core.model)
     implementation(libs.junit)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.mockk)

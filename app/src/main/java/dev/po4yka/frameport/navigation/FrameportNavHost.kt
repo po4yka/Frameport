@@ -5,6 +5,7 @@ import androidx.compose.ui.Modifier
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.ui.NavDisplay
+import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.feature.connection.CameraConnectRoute
 import dev.po4yka.frameport.feature.connection.CameraScanRoute
 import dev.po4yka.frameport.feature.diagnostics.DiagnosticsRoute
@@ -52,7 +53,12 @@ fun FrameportNavHost(
                     }
 
                     FrameportDestination.Gallery -> {
-                        GalleryRoute()
+                        // SessionId(0L) is a scaffold sentinel — no real session in v1 scaffold.
+                        // The real session ID will be passed once camera connection flows through.
+                        GalleryRoute(
+                            sessionId = SessionId(0L),
+                            onImportSelected = { backStack.navigate(FrameportDestination.Import) },
+                        )
                     }
 
                     FrameportDestination.Import -> {

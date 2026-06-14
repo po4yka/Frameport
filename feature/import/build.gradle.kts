@@ -7,10 +7,16 @@ plugins {
 
 android {
     namespace = "dev.po4yka.frameport.feature.importmedia"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
-        minSdk = libs.versions.minSdk.get().toInt()
+        minSdk =
+            libs.versions.minSdk
+                .get()
+                .toInt()
     }
 
     compileOptions {
@@ -31,6 +37,7 @@ android {
 
 dependencies {
     implementation(projects.camera.api)
+    implementation(projects.camera.domain)
     implementation(projects.core.designsystem)
     implementation(projects.core.model)
     implementation(platform(libs.androidx.compose.bom))
@@ -44,4 +51,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
     ksp(libs.androidx.hilt.compiler)
+
+    testImplementation(projects.core.testing)
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.turbine)
 }
