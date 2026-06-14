@@ -7,6 +7,8 @@ import dev.po4yka.frameport.camera.api.CameraRepository
 import dev.po4yka.frameport.camera.api.CameraSessionState
 import dev.po4yka.frameport.camera.api.CameraWifiCredentials
 import dev.po4yka.frameport.camera.api.SessionId
+import dev.po4yka.frameport.camera.domain.BleAssistedConnectUseCase
+import dev.po4yka.frameport.camera.domain.BleHandoffState
 import dev.po4yka.frameport.camera.domain.OpenCameraSessionUseCase
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,12 +28,13 @@ import javax.inject.Inject
  * exhaustively branch without string comparison.
  *
  * States:
- * - [Idle]              — No active connection attempt; SSID field is editable.
- * - [EnteringCredentials] — User is typing an SSID; Connect is enabled.
- * - [Connecting]        — [OpenCameraSessionUseCase] is in progress.
- * - [Connected]         — Session is open; shows session info.
- * - [Disconnecting]     — closeSession call is in flight.
- * - [Error]             — A typed [ConnectionError] describes what went wrong.
+ * - [Idle]                   — No active connection attempt; SSID field is editable.
+ * - [EnteringCredentials]    — User is typing an SSID; Connect is enabled.
+ * - [Connecting]             — [OpenCameraSessionUseCase] is in progress (manual path).
+ * - [ConnectingViaBleHandoff] — [BleAssistedConnectUseCase] is in progress (BLE handoff path).
+ * - [Connected]              — Session is open; shows session info.
+ * - [Disconnecting]          — closeSession call is in flight.
+ * - [Error]                  — A typed [ConnectionError] describes what went wrong.
  */
 sealed interface ConnectionUiState {
     data object Idle : ConnectionUiState
@@ -42,6 +45,18 @@ sealed interface ConnectionUiState {
 
     data class Connecting(
         val ssid: String,
+    ) : ConnectionUiState
+
+    /**
+     * BLE-assisted Wi-Fi handoff is in progress.
+     *
+     * [stepLabel] is a safe, non-PII human-readable description of the current
+     * handoff step (e.g. "Scanning for camera", "Connecting via Bluetooth",
+     * "Joining camera network"). It is derived from [BleHandoffState] by the ViewModel
+     * and never contains an SSID, passphrase, BLE MAC address, or raw bytes.
+     */
+    data class ConnectingViaBleHandoff(
+        val stepLabel: String,
     ) : ConnectionUiState
 
     data class Connected(
@@ -71,6 +86,7 @@ class ConnectionViewModel
     constructor(
         private val openCameraSessionUseCase: OpenCameraSessionUseCase,
         private val cameraRepository: CameraRepository,
+        private val bleAssistedConnectUseCase: BleAssistedConnectUseCase,
     ) : ViewModel() {
         private val _uiState = MutableStateFlow<ConnectionUiState>(ConnectionUiState.Idle)
         val uiState: StateFlow<ConnectionUiState> = _uiState.asStateFlow()
@@ -97,6 +113,37 @@ class ConnectionViewModel
             viewModelScope.launch {
                 openCameraSessionUseCase(credentials).collect { sessionState ->
                     _uiState.value = sessionState.toConnectionUiState(trimmedSsid)
+                }
+            }
+        }
+
+        /**
+         * Initiates the BLE-assisted Wi-Fi handoff flow.
+         *
+         * Emits typed [ConnectionUiState.ConnectingViaBleHandoff] updates as the handoff
+         * progresses through scanning, GATT connect, credential read, and network join phases.
+         * On success, transitions to [ConnectionUiState.Connected] (ssid obtained from BLE).
+         * On failure, transitions to [ConnectionUiState.Error] with an appropriate [ConnectionError].
+         *
+         * PRIVACY contract: no SSID, passphrase, BLE MAC address, or raw bytes are ever
+         * passed to Timber or any logging call from this method.
+         *
+         * cancel-safe: [BleAssistedConnectUseCase.invoke] returns a cold Flow; cancelling
+         * the viewModelScope job stops the Flow at the next suspension point cleanly.
+         */
+        fun startBleHandoff() {
+            val current = _uiState.value
+            // Ignore if already connecting or connected to avoid duplicate flows.
+            if (current is ConnectionUiState.Connecting ||
+                current is ConnectionUiState.ConnectingViaBleHandoff ||
+                current is ConnectionUiState.Connected
+            ) {
+                return
+            }
+
+            viewModelScope.launch {
+                bleAssistedConnectUseCase().collect { handoffState ->
+                    _uiState.value = handoffState.toConnectionUiState()
                 }
             }
         }
@@ -156,6 +203,55 @@ class ConnectionViewModel
 
                 CameraSessionState.Closed -> {
                     ConnectionUiState.Idle
+                }
+            }
+
+        /**
+         * Maps a [BleHandoffState] to a [ConnectionUiState].
+         *
+         * cancel-safe: pure mapping; no suspension.
+         *
+         * PRIVACY: [BleHandoffState.RequestingNetwork.ssid] and
+         * [BleHandoffState.Connected.ssid] carry the network name for display purposes.
+         * They are NOT logged here — only surfaced to the Composable for display.
+         * The passphrase is never present in any [BleHandoffState] variant; it is consumed
+         * and discarded inside [BleAssistedConnectUseCase].
+         */
+        private fun BleHandoffState.toConnectionUiState(): ConnectionUiState =
+            when (this) {
+                BleHandoffState.Scanning -> {
+                    ConnectionUiState.ConnectingViaBleHandoff(stepLabel = "Scanning for camera…")
+                }
+
+                is BleHandoffState.CameraFound -> {
+                    ConnectionUiState.ConnectingViaBleHandoff(stepLabel = "Camera found — connecting via Bluetooth…")
+                }
+
+                BleHandoffState.ObtainingCredentials -> {
+                    ConnectionUiState.ConnectingViaBleHandoff(stepLabel = "Obtaining Wi-Fi credentials from camera…")
+                }
+
+                is BleHandoffState.RequestingNetwork -> {
+                    ConnectionUiState.ConnectingViaBleHandoff(stepLabel = "Joining camera Wi-Fi network…")
+                }
+
+                is BleHandoffState.Connected -> {
+                    // ssid is the camera network name; safe to surface for display.
+                    ConnectionUiState.Connected(
+                        // Session ID is not yet available at this state — use a sentinel.
+                        // The PTP-IP session open (OpenCameraSessionUseCase) is a subsequent step.
+                        // TODO(m14): wire through the PTP-IP session open after BLE handoff completes.
+                        sessionId = SessionId(-1L),
+                        ssid = ssid,
+                    )
+                }
+
+                is BleHandoffState.Failed -> {
+                    // reason is already PII-redacted by BleAssistedConnectUseCase.
+                    ConnectionUiState.Error(
+                        connectionError = ConnectionError.Unknown(reason),
+                        ssid = "",
+                    )
                 }
             }
     }

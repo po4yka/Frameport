@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+        BLE permissions required for Android-owned scanning and GATT connection.
+        BLUETOOTH_SCAN: discover nearby BLE cameras (API 31+, runtime permission).
+        BLUETOOTH_CONNECT: open and manage GATT connections (API 31+, runtime permission).
+        See: android-foreground-service-types.md, docs/android/bluetooth-architecture.md
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+</manifest>

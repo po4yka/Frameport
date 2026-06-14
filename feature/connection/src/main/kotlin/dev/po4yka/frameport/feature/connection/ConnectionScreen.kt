@@ -57,6 +57,7 @@ fun CameraScanRoute(
         state = state,
         onSsidChanged = viewModel::onSsidChanged,
         onConnect = viewModel::connect,
+        onStartBleHandoff = viewModel::startBleHandoff,
         onDisconnect = viewModel::disconnect,
         onRetry = viewModel::retry,
         onCancel = {
@@ -87,6 +88,7 @@ fun CameraConnectRoute(
         state = state,
         onSsidChanged = viewModel::onSsidChanged,
         onConnect = viewModel::connect,
+        onStartBleHandoff = viewModel::startBleHandoff,
         onDisconnect = viewModel::disconnect,
         onRetry = viewModel::retry,
         onCancel = viewModel::cancel,
@@ -109,6 +111,7 @@ fun ConnectionScreen(
     state: ConnectionUiState,
     onSsidChanged: (String) -> Unit,
     onConnect: (String) -> Unit,
+    onStartBleHandoff: () -> Unit,
     onDisconnect: () -> Unit,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
@@ -145,6 +148,11 @@ fun ConnectionScreen(
             )
         }
 
+        // ── BLE handoff progress card ────────────────────────────────────────
+        if (state is ConnectionUiState.ConnectingViaBleHandoff) {
+            BleHandoffProgressCard(stepLabel = state.stepLabel)
+        }
+
         // ── Primary action ───────────────────────────────────────────────────
         when (state) {
             is ConnectionUiState.Idle,
@@ -155,11 +163,24 @@ fun ConnectionScreen(
                     onClick = { onConnect(ssidDraft) },
                     enabled = ssidDraft.isNotBlank(),
                 )
+                PrimaryActionButton(
+                    text = "Connect via Bluetooth",
+                    onClick = onStartBleHandoff,
+                    enabled = true,
+                )
             }
 
             is ConnectionUiState.Connecting -> {
                 PrimaryActionButton(
                     text = "Connecting…",
+                    onClick = {},
+                    enabled = false,
+                )
+            }
+
+            is ConnectionUiState.ConnectingViaBleHandoff -> {
+                PrimaryActionButton(
+                    text = "Connecting via Bluetooth…",
                     onClick = {},
                     enabled = false,
                 )
@@ -193,7 +214,9 @@ fun ConnectionScreen(
             PrimaryActionButton(
                 text = "Cancel",
                 onClick = onCancel,
-                enabled = state !is ConnectionUiState.Connecting,
+                enabled =
+                    state !is ConnectionUiState.Connecting &&
+                        state !is ConnectionUiState.ConnectingViaBleHandoff,
             )
         }
 
@@ -213,12 +236,34 @@ private fun SessionStateRow(
 ) {
     val (label, colors) =
         when (state) {
-            ConnectionUiState.Idle -> "Idle" to FrameportTokens.SessionStateColors.idle()
-            is ConnectionUiState.EnteringCredentials -> "Ready to connect" to FrameportTokens.SessionStateColors.idle()
-            is ConnectionUiState.Connecting -> "Connecting" to FrameportTokens.SessionStateColors.connecting()
-            is ConnectionUiState.Connected -> "Connected" to FrameportTokens.SessionStateColors.ready()
-            ConnectionUiState.Disconnecting -> "Disconnecting" to FrameportTokens.SessionStateColors.connecting()
-            is ConnectionUiState.Error -> "Error" to FrameportTokens.SessionStateColors.failed()
+            ConnectionUiState.Idle -> {
+                "Idle" to FrameportTokens.SessionStateColors.idle()
+            }
+
+            is ConnectionUiState.EnteringCredentials -> {
+                "Ready to connect" to FrameportTokens.SessionStateColors.idle()
+            }
+
+            is ConnectionUiState.Connecting -> {
+                "Connecting" to FrameportTokens.SessionStateColors.connecting()
+            }
+
+            is ConnectionUiState.ConnectingViaBleHandoff -> {
+                "Connecting via BLE" to
+                    FrameportTokens.SessionStateColors.connecting()
+            }
+
+            is ConnectionUiState.Connected -> {
+                "Connected" to FrameportTokens.SessionStateColors.ready()
+            }
+
+            ConnectionUiState.Disconnecting -> {
+                "Disconnecting" to FrameportTokens.SessionStateColors.connecting()
+            }
+
+            is ConnectionUiState.Error -> {
+                "Error" to FrameportTokens.SessionStateColors.failed()
+            }
         }
     Row(
         modifier = modifier,
@@ -250,6 +295,41 @@ private fun ConnectedSessionCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/**
+ * Informational card shown while the BLE-assisted Wi-Fi handoff is in progress.
+ *
+ * [stepLabel] is a safe, non-PII description of the current handoff step.
+ * It is authored by [ConnectionViewModel.BleHandoffState.toConnectionUiState] and
+ * never contains an SSID, passphrase, BLE MAC address, or raw bytes.
+ */
+@Composable
+private fun BleHandoffProgressCard(
+    stepLabel: String,
+    modifier: Modifier = Modifier,
+) {
+    val colors = FrameportTokens.SessionStateColors.connecting()
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = colors.container),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Bluetooth Handoff",
+                style = MaterialTheme.typography.titleSmall,
+                color = colors.content,
+            )
+            Text(
+                text = stepLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.content,
+            )
+        }
     }
 }
 
@@ -379,6 +459,7 @@ private fun ConnectionScreenIdlePreview() {
             state = ConnectionUiState.Idle,
             onSsidChanged = {},
             onConnect = {},
+            onStartBleHandoff = {},
             onDisconnect = {},
             onRetry = {},
             onCancel = {},
@@ -398,6 +479,7 @@ private fun ConnectionScreenConnectedPreview() {
                 ),
             onSsidChanged = {},
             onConnect = {},
+            onStartBleHandoff = {},
             onDisconnect = {},
             onRetry = {},
             onCancel = {},
@@ -417,6 +499,7 @@ private fun ConnectionScreenWifiErrorPreview() {
                 ),
             onSsidChanged = {},
             onConnect = {},
+            onStartBleHandoff = {},
             onDisconnect = {},
             onRetry = {},
             onCancel = {},
@@ -436,6 +519,7 @@ private fun ConnectionScreenPermissionErrorPreview() {
                 ),
             onSsidChanged = {},
             onConnect = {},
+            onStartBleHandoff = {},
             onDisconnect = {},
             onRetry = {},
             onCancel = {},
@@ -451,6 +535,61 @@ private fun ConnectionScreenConnectingPreview() {
             state = ConnectionUiState.Connecting(ssid = "FUJIFILM-X-T5-ABCD"),
             onSsidChanged = {},
             onConnect = {},
+            onStartBleHandoff = {},
+            onDisconnect = {},
+            onRetry = {},
+            onCancel = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Connection — BLE Handoff (Scanning)")
+@Composable
+private fun ConnectionScreenBleHandoffScanningPreview() {
+    FrameportTheme {
+        ConnectionScreen(
+            state = ConnectionUiState.ConnectingViaBleHandoff(stepLabel = "Scanning for camera…"),
+            onSsidChanged = {},
+            onConnect = {},
+            onStartBleHandoff = {},
+            onDisconnect = {},
+            onRetry = {},
+            onCancel = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Connection — BLE Handoff (Obtaining Credentials)")
+@Composable
+private fun ConnectionScreenBleHandoffCredentialsPreview() {
+    FrameportTheme {
+        ConnectionScreen(
+            state =
+                ConnectionUiState.ConnectingViaBleHandoff(
+                    stepLabel = "Obtaining Wi-Fi credentials from camera…",
+                ),
+            onSsidChanged = {},
+            onConnect = {},
+            onStartBleHandoff = {},
+            onDisconnect = {},
+            onRetry = {},
+            onCancel = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Connection — BLE Handoff (Joining Network)")
+@Composable
+private fun ConnectionScreenBleHandoffJoiningPreview() {
+    FrameportTheme {
+        ConnectionScreen(
+            state =
+                ConnectionUiState.ConnectingViaBleHandoff(
+                    stepLabel = "Joining camera Wi-Fi network…",
+                ),
+            onSsidChanged = {},
+            onConnect = {},
+            onStartBleHandoff = {},
             onDisconnect = {},
             onRetry = {},
             onCancel = {},

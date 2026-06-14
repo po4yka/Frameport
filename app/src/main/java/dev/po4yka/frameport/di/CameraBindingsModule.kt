@@ -4,8 +4,6 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
-import dev.po4yka.frameport.camera.bluetooth.FujiBleClient
-import dev.po4yka.frameport.camera.bluetooth.NoOpFujiBleClient
 import dev.po4yka.frameport.camera.usb.CameraUsbConnector
 import dev.po4yka.frameport.camera.usb.NoOpCameraUsbConnector
 import javax.inject.Singleton
@@ -25,14 +23,13 @@ import javax.inject.Singleton
  * in :camera:diagnostics and is no longer provided here.
  *
  * Dispatcher bindings remain in AppDispatchersModule.
+ *
+ * FujiBleClient is provided by :camera:bluetooth BluetoothModule (@Binds AndroidFujiBleClient).
+ * The NoOp provider that lived here has been removed to avoid a Hilt duplicate-binding error.
  */
 @Module
 @InstallIn(SingletonComponent::class)
 object CameraBindingsModule {
-    @Provides
-    @Singleton
-    fun providesFujiBleClient(): FujiBleClient = NoOpFujiBleClient()
-
     @Provides
     @Singleton
     fun providesCameraUsbConnector(): CameraUsbConnector = NoOpCameraUsbConnector()

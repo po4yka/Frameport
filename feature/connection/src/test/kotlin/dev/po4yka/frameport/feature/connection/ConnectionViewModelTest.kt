@@ -1,15 +1,26 @@
 package dev.po4yka.frameport.feature.connection
 
 import app.cash.turbine.test
-import dev.po4yka.frameport.camera.api.CameraSessionState
-import dev.po4yka.frameport.camera.api.CameraWifiCredentials
+import dev.po4yka.frameport.camera.api.BleCameraAdvertisement
+import dev.po4yka.frameport.camera.api.BleCameraRef
+import dev.po4yka.frameport.camera.api.BleConnectionState
+import dev.po4yka.frameport.camera.api.CharacteristicId
+import dev.po4yka.frameport.camera.api.FujiBleClient
+import dev.po4yka.frameport.camera.api.NoOpFujiBleClient
 import dev.po4yka.frameport.camera.api.SessionId
+import dev.po4yka.frameport.camera.domain.BleAssistedConnectUseCase
 import dev.po4yka.frameport.camera.domain.OpenCameraSessionUseCase
 import dev.po4yka.frameport.core.model.FrameportError
 import dev.po4yka.frameport.core.model.TransportKind
 import dev.po4yka.frameport.core.testing.FakeCameraRepository
+import dev.po4yka.frameport.core.testing.FakeCameraWifiConnector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -17,9 +28,86 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import timber.log.Timber
+
+// ─── Test doubles ─────────────────────────────────────────────────────────────
+
+/**
+ * Fake [FujiBleClient] for unit tests.
+ *
+ * Scan emits [advertisementToEmit] once (if non-null) then completes.
+ * Connect succeeds immediately and advances [connectionState] to [BleConnectionState.Connected].
+ * Read returns [characteristicValues] keyed by [CharacteristicId.value], or failure if absent.
+ * PRIVACY: no real BLE credentials ever flow through this fake.
+ */
+private class ControlledFujiBleClient : FujiBleClient {
+    private val _connectionState = MutableStateFlow(BleConnectionState.Disconnected)
+    override val connectionState: StateFlow<BleConnectionState> = _connectionState
+
+    var advertisementToEmit: BleCameraAdvertisement? = null
+    val characteristicValues: MutableMap<String, ByteArray> = mutableMapOf()
+    var connectResult: Result<Unit> = Result.success(Unit)
+
+    // cancel-safe: cold flow; emits one advertisement then completes.
+    override fun scan(): Flow<BleCameraAdvertisement> =
+        flow {
+            advertisementToEmit?.let { emit(it) }
+        }
+
+    // cancel-safe: no real suspension.
+    override suspend fun connect(camera: BleCameraRef): Result<Unit> {
+        if (connectResult.isSuccess) {
+            _connectionState.value = BleConnectionState.Connected
+        }
+        return connectResult
+    }
+
+    // cancel-safe: no real suspension.
+    override suspend fun read(characteristic: CharacteristicId): Result<ByteArray> {
+        val bytes =
+            characteristicValues[characteristic.value]
+                ?: return Result.failure(IllegalStateException("No value for characteristic: ${characteristic.value}"))
+        return Result.success(bytes)
+    }
+
+    // cancel-safe: no real suspension.
+    override suspend fun write(
+        characteristic: CharacteristicId,
+        payload: ByteArray,
+    ): Result<Unit> = Result.success(Unit)
+
+    // cancel-safe: cold flow backed by an emptyFlow for simplicity.
+    override fun notifications(characteristic: CharacteristicId): Flow<ByteArray> = emptyFlow()
+
+    // cancel-safe: idempotent.
+    override suspend fun disconnect() {
+        _connectionState.value = BleConnectionState.Disconnected
+    }
+}
+
+/**
+ * Timber Tree that records all log messages for assertion in privacy tests.
+ * Must be uprooted after each test to avoid cross-test pollution.
+ */
+private class RecordingTimberTree : Timber.Tree() {
+    val messages = mutableListOf<String>()
+
+    override fun log(
+        priority: Int,
+        tag: String?,
+        message: String,
+        t: Throwable?,
+    ) {
+        messages.add(message)
+        t?.message?.let { messages.add(it) }
+    }
+}
+
+// ─── Test class ───────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionViewModelTest {
@@ -35,12 +123,22 @@ class ConnectionViewModelTest {
         // UnconfinedTestDispatcher so the flowOn(ioDispatcher) in OpenCameraSessionUseCase
         // executes eagerly in the test coroutine context without needing advanceUntilIdle.
         useCase = OpenCameraSessionUseCase(fakeRepo, testDispatcher)
-        viewModel = ConnectionViewModel(useCase, fakeRepo)
+        viewModel = buildViewModel()
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+    }
+
+    private fun buildViewModel(bleClient: FujiBleClient = NoOpFujiBleClient()): ConnectionViewModel {
+        val bleUseCase =
+            BleAssistedConnectUseCase(
+                fujiBleClient = bleClient,
+                cameraWifiConnector = FakeCameraWifiConnector(),
+                ioDispatcher = testDispatcher,
+            )
+        return ConnectionViewModel(useCase, fakeRepo, bleUseCase)
     }
 
     // ── Initial state ─────────────────────────────────────────────────────────
@@ -256,6 +354,145 @@ class ConnectionViewModelTest {
             }
         }
 
+    // ── startBleHandoff() ─────────────────────────────────────────────────────
+
+    /**
+     * Verifies that [ConnectionViewModel.startBleHandoff] transitions through
+     * [ConnectionUiState.ConnectingViaBleHandoff] states and resolves to
+     * [ConnectionUiState.Connected] when the BLE handoff succeeds.
+     *
+     * Uses [ControlledFujiBleClient] to supply a synthetic advertisement + SSID/passphrase
+     * bytes without any real BLE hardware.
+     *
+     * PRIVACY: [BLE_TEST_SSID] and [BLE_TEST_PASSPHRASE] are synthetic test values
+     * that must never appear in production captures or logs.
+     */
+    @Test
+    fun startBleHandoffEmitsConnectingViaBleHandoffThenConnected() =
+        runTest(testDispatcher) {
+            val bleClient =
+                ControlledFujiBleClient().apply {
+                    advertisementToEmit =
+                        BleCameraAdvertisement(
+                            camera = BleCameraRef(id = "fake-id", displayName = "Test Cam"),
+                            signalStrengthDbm = -60,
+                        )
+                    // SSID characteristic UUID from FujiCharacteristicIds.WIFI_SSID
+                    characteristicValues["4186f39e-cd9e-11e4-8dfc-aa07a5b093db"] =
+                        BLE_TEST_SSID.toByteArray(Charsets.UTF_8)
+                    // Passphrase characteristic UUID from FujiCharacteristicIds.WIFI_PASSPHRASE
+                    // PRIVACY: synthetic value only — never a real credential
+                    characteristicValues["4186f3c0-cd9e-11e4-8dfc-aa07a5b093db"] =
+                        BLE_TEST_PASSPHRASE.toByteArray(Charsets.UTF_8)
+                }
+            val vm = buildViewModel(bleClient)
+
+            // With UnconfinedTestDispatcher, the flow in BleAssistedConnectUseCase runs
+            // eagerly. We record states observed via StateFlow.value at each step.
+            // We assert the terminal state is Connected and ssid matches.
+            vm.startBleHandoff()
+            advanceUntilIdle()
+
+            val finalState = vm.uiState.value
+            assertTrue(
+                "Expected final state to be Connected after successful BLE handoff, got: $finalState",
+                finalState is ConnectionUiState.Connected,
+            )
+            assertEquals(
+                BLE_TEST_SSID,
+                (finalState as ConnectionUiState.Connected).ssid,
+            )
+        }
+
+    @Test
+    fun startBleHandoffOnFailureTransitionsToError() =
+        runTest(testDispatcher) {
+            // Provide a client whose scan emits one advertisement but connect fails.
+            val bleClient =
+                ControlledFujiBleClient().apply {
+                    advertisementToEmit =
+                        BleCameraAdvertisement(
+                            camera = BleCameraRef(id = "fake-id", displayName = null),
+                            signalStrengthDbm = null,
+                        )
+                    connectResult = Result.failure(IllegalStateException("GATT connect refused"))
+                }
+            val vm = buildViewModel(bleClient)
+
+            vm.startBleHandoff()
+            advanceUntilIdle()
+
+            val finalState = vm.uiState.value
+            assertTrue(
+                "Expected Error after GATT connect failure, got: $finalState",
+                finalState is ConnectionUiState.Error,
+            )
+        }
+
+    @Test
+    fun startBleHandoffIsNoOpWhenAlreadyConnected() =
+        runTest(testDispatcher) {
+            fakeRepo.simulateSuccess(SessionId(1L))
+            viewModel.connect("FUJIFILM-X-T5")
+            advanceUntilIdle()
+            val stateBefore = viewModel.uiState.value
+            assertTrue(stateBefore is ConnectionUiState.Connected)
+
+            viewModel.startBleHandoff()
+            advanceUntilIdle()
+
+            assertEquals(stateBefore, viewModel.uiState.value)
+        }
+
+    // ── Log-privacy guard ─────────────────────────────────────────────────────
+
+    /**
+     * Verifies that neither the Wi-Fi passphrase nor a BLE MAC address appear in any
+     * Timber log message recorded during a BLE handoff from [ConnectionViewModel].
+     *
+     * A [RecordingTimberTree] is planted before the call and uprooted after assertion.
+     * This test covers the ViewModel boundary only — [BleAssistedConnectUseCase] and
+     * [AndroidFujiBleClient] have their own privacy tests.
+     *
+     * Synthetic test credentials [BLE_TEST_PASSPHRASE] and [BLE_TEST_MAC] must never
+     * appear in any log output.
+     */
+    @Test
+    fun bleHandoffViewModelNeverLogsPassphraseOrMac() =
+        runTest(testDispatcher) {
+            val bleClient =
+                ControlledFujiBleClient().apply {
+                    advertisementToEmit =
+                        BleCameraAdvertisement(
+                            camera = BleCameraRef(id = BLE_TEST_MAC, displayName = null),
+                            signalStrengthDbm = -55,
+                        )
+                    characteristicValues["4186f39e-cd9e-11e4-8dfc-aa07a5b093db"] =
+                        BLE_TEST_SSID.toByteArray(Charsets.UTF_8)
+                    characteristicValues["4186f3c0-cd9e-11e4-8dfc-aa07a5b093db"] =
+                        BLE_TEST_PASSPHRASE.toByteArray(Charsets.UTF_8)
+                }
+            val vm = buildViewModel(bleClient)
+            val recordingTree = RecordingTimberTree()
+            Timber.plant(recordingTree)
+            try {
+                vm.startBleHandoff()
+                advanceUntilIdle()
+
+                val allMessages = recordingTree.messages.joinToString("\n")
+                assertFalse(
+                    "Passphrase '$BLE_TEST_PASSPHRASE' must not appear in any log message",
+                    allMessages.contains(BLE_TEST_PASSPHRASE),
+                )
+                assertFalse(
+                    "BLE MAC '$BLE_TEST_MAC' must not appear in any log message",
+                    allMessages.contains(BLE_TEST_MAC),
+                )
+            } finally {
+                Timber.uproot(recordingTree)
+            }
+        }
+
     // ── mapToConnectionError() unit tests (pure function) ─────────────────────
 
     @Test
@@ -292,7 +529,10 @@ class ConnectionViewModelTest {
                 FrameportError.PermissionDenied("android.permission.READ_MEDIA_IMAGES", "denied"),
             )
         assertTrue(result is ConnectionError.Permission.Other)
-        assertEquals("android.permission.READ_MEDIA_IMAGES", (result as ConnectionError.Permission.Other).permission)
+        assertEquals(
+            "android.permission.READ_MEDIA_IMAGES",
+            (result as ConnectionError.Permission.Other).permission,
+        )
     }
 
     @Test
@@ -330,5 +570,22 @@ class ConnectionViewModelTest {
         val result = mapToConnectionError(FrameportError.Unknown("something"))
         assertTrue(result is ConnectionError.Unknown)
         assertEquals("something", (result as ConnectionError.Unknown).message)
+    }
+
+    companion object {
+        /** Synthetic SSID used as a test sentinel. Never a real camera network name. */
+        const val BLE_TEST_SSID = "FUJIFILM-X-T5-TEST"
+
+        /**
+         * Synthetic passphrase used as a privacy-check sentinel.
+         * MUST NOT appear in any log output. Never a real credential.
+         */
+        const val BLE_TEST_PASSPHRASE = "S3cr3tP@ssphrase-TEST"
+
+        /**
+         * Synthetic BLE MAC address used as a privacy-check sentinel.
+         * MUST NOT appear in plain-text logs. Never a real device address.
+         */
+        const val BLE_TEST_MAC = "AA:BB:CC:DD:EE:FF"
     }
 }
