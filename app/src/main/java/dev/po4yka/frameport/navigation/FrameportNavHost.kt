@@ -26,40 +26,58 @@ fun FrameportNavHost(
         backStack = backStack,
         onBack = {
             if (backStack.size > 1) {
-                backStack.removeLast()
+                backStack.removeAt(backStack.lastIndex)
             }
         },
         entryProvider = { key ->
             NavEntry(key) { destination ->
                 when (destination) {
-                    FrameportDestination.Onboarding ->
+                    FrameportDestination.Onboarding -> {
                         OnboardingRoute(onContinue = { backStack.replaceWith(FrameportDestination.Home) })
+                    }
 
-                    FrameportDestination.Home ->
+                    FrameportDestination.Home -> {
                         HomeRoute(onNavigate = backStack::navigate)
+                    }
 
-                    FrameportDestination.CameraScan ->
+                    FrameportDestination.CameraScan -> {
                         CameraScanRoute(
                             onConnectManually = { backStack.navigate(FrameportDestination.CameraConnect) },
                             onCancel = { backStack.popToHome() },
                         )
+                    }
 
-                    FrameportDestination.CameraConnect ->
+                    FrameportDestination.CameraConnect -> {
                         CameraConnectRoute(onCancel = { backStack.popToHome() })
+                    }
 
-                    FrameportDestination.Gallery -> GalleryRoute()
+                    FrameportDestination.Gallery -> {
+                        GalleryRoute()
+                    }
 
-                    FrameportDestination.Import -> ImportRoute()
+                    FrameportDestination.Import -> {
+                        ImportRoute()
+                    }
 
-                    FrameportDestination.Remote -> RemoteRoute()
+                    FrameportDestination.Remote -> {
+                        RemoteRoute()
+                    }
 
-                    FrameportDestination.LiveView -> LiveViewRoute()
+                    FrameportDestination.LiveView -> {
+                        LiveViewRoute()
+                    }
 
-                    FrameportDestination.Diagnostics -> DiagnosticsRoute()
+                    FrameportDestination.Diagnostics -> {
+                        DiagnosticsRoute()
+                    }
 
-                    FrameportDestination.Settings -> SettingsRoute()
+                    FrameportDestination.Settings -> {
+                        SettingsRoute()
+                    }
 
-                    else -> HomeRoute(onNavigate = backStack::navigate)
+                    else -> {
+                        HomeRoute(onNavigate = backStack::navigate)
+                    }
                 }
             }
         },
