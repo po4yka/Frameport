@@ -7,7 +7,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.po4yka.frameport.camera.api.CameraMediaRepository
+import dev.po4yka.frameport.camera.api.TransferRepository
 import dev.po4yka.frameport.core.designsystem.EmptyState
 import dev.po4yka.frameport.core.designsystem.FrameportCard
 import dev.po4yka.frameport.core.designsystem.FrameportScreen
@@ -27,18 +27,20 @@ sealed interface ImportAction {
 }
 
 @HiltViewModel
-class ImportViewModel @Inject constructor(
-    private val cameraMediaRepository: CameraMediaRepository,
-) : ViewModel() {
-    private val mutableState = MutableStateFlow(ImportUiState())
-    val uiState: StateFlow<ImportUiState> = mutableState.asStateFlow()
+class ImportViewModel
+    @Inject
+    constructor(
+        private val transferRepository: TransferRepository,
+    ) : ViewModel() {
+        private val mutableState = MutableStateFlow(ImportUiState())
+        val uiState: StateFlow<ImportUiState> = mutableState.asStateFlow()
 
-    fun onAction(action: ImportAction) {
-        when (action) {
-            ImportAction.Refresh -> mutableState.value = ImportUiState(message = "No fake import jobs are queued.")
+        fun onAction(action: ImportAction) {
+            when (action) {
+                ImportAction.Refresh -> mutableState.value = ImportUiState(message = "No fake import jobs are queued.")
+            }
         }
     }
-}
 
 @Composable
 fun ImportRoute(viewModel: ImportViewModel = hiltViewModel()) {

@@ -7,7 +7,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.po4yka.frameport.camera.api.CameraConnectionManager
+import dev.po4yka.frameport.camera.api.CameraRepository
 import dev.po4yka.frameport.core.designsystem.FrameportCard
 import dev.po4yka.frameport.core.designsystem.FrameportScreen
 import dev.po4yka.frameport.core.designsystem.FrameportTheme
@@ -26,18 +26,20 @@ sealed interface RemoteAction {
 }
 
 @HiltViewModel
-class RemoteViewModel @Inject constructor(
-    private val cameraConnectionManager: CameraConnectionManager,
-) : ViewModel() {
-    private val mutableState = MutableStateFlow(RemoteUiState())
-    val uiState: StateFlow<RemoteUiState> = mutableState.asStateFlow()
+class RemoteViewModel
+    @Inject
+    constructor(
+        private val cameraRepository: CameraRepository,
+    ) : ViewModel() {
+        private val mutableState = MutableStateFlow(RemoteUiState())
+        val uiState: StateFlow<RemoteUiState> = mutableState.asStateFlow()
 
-    fun onAction(action: RemoteAction) {
-        when (action) {
-            RemoteAction.Refresh -> mutableState.value = RemoteUiState()
+        fun onAction(action: RemoteAction) {
+            when (action) {
+                RemoteAction.Refresh -> mutableState.value = RemoteUiState()
+            }
         }
     }
-}
 
 @Composable
 fun RemoteRoute(viewModel: RemoteViewModel = hiltViewModel()) {

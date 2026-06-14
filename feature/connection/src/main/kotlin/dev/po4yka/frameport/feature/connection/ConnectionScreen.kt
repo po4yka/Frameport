@@ -9,7 +9,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.po4yka.frameport.camera.api.CameraConnectionManager
+import dev.po4yka.frameport.camera.api.CameraRepository
+import dev.po4yka.frameport.camera.api.CameraSessionState
 import dev.po4yka.frameport.core.designsystem.FrameportCard
 import dev.po4yka.frameport.core.designsystem.FrameportScreen
 import dev.po4yka.frameport.core.designsystem.FrameportTheme
@@ -31,7 +32,9 @@ data class ConnectionUiState(
     val canCancel: Boolean = false,
 )
 
-enum class ConnectionStep(val label: String) {
+enum class ConnectionStep(
+    val label: String,
+) {
     Idle("Idle"),
     Scanning("Scanning"),
     CameraFound("Camera found"),
@@ -43,55 +46,73 @@ enum class ConnectionStep(val label: String) {
 
 sealed interface ConnectionAction {
     data object StartScan : ConnectionAction
+
     data object ConnectManually : ConnectionAction
+
     data object Cancel : ConnectionAction
 }
 
 sealed interface ConnectionUiEvent {
     data object RequestManualConnection : ConnectionUiEvent
+
     data object Cancelled : ConnectionUiEvent
 }
 
 @HiltViewModel
-class ConnectionViewModel @Inject constructor(
-    private val cameraConnectionManager: CameraConnectionManager,
-) : ViewModel() {
-    private val mutableState = MutableStateFlow(ConnectionUiState())
-    val uiState: StateFlow<ConnectionUiState> = mutableState.asStateFlow()
+class ConnectionViewModel
+    @Inject
+    constructor(
+        private val cameraRepository: CameraRepository,
+    ) : ViewModel() {
+        private val mutableState = MutableStateFlow(ConnectionUiState())
+        val uiState: StateFlow<ConnectionUiState> = mutableState.asStateFlow()
 
-    private val mutableEvents = MutableSharedFlow<ConnectionUiEvent>()
-    val events: SharedFlow<ConnectionUiEvent> = mutableEvents.asSharedFlow()
+        private val mutableEvents = MutableSharedFlow<ConnectionUiEvent>()
+        val events: SharedFlow<ConnectionUiEvent> = mutableEvents.asSharedFlow()
 
-    fun onAction(action: ConnectionAction) {
-        when (action) {
-            ConnectionAction.StartScan -> startPlaceholderScan()
-            ConnectionAction.ConnectManually -> viewModelScope.launch {
-                mutableEvents.emit(ConnectionUiEvent.RequestManualConnection)
+        fun onAction(action: ConnectionAction) {
+            when (action) {
+                ConnectionAction.StartScan -> {
+                    startPlaceholderScan()
+                }
+
+                ConnectionAction.ConnectManually -> {
+                    viewModelScope.launch {
+                        mutableEvents.emit(ConnectionUiEvent.RequestManualConnection)
+                    }
+                }
+
+                ConnectionAction.Cancel -> {
+                    viewModelScope.launch {
+                        val currentState = cameraRepository.sessionState.value
+                        if (currentState is CameraSessionState.SessionReady) {
+                            cameraRepository.closeSession(currentState.sessionId)
+                        }
+                        mutableState.value = ConnectionUiState()
+                        mutableEvents.emit(ConnectionUiEvent.Cancelled)
+                    }
+                }
             }
-            ConnectionAction.Cancel -> viewModelScope.launch {
-                cameraConnectionManager.disconnect()
-                mutableState.value = ConnectionUiState()
-                mutableEvents.emit(ConnectionUiEvent.Cancelled)
+        }
+
+        private fun startPlaceholderScan() {
+            viewModelScope.launch {
+                mutableState.value =
+                    ConnectionUiState(
+                        step = ConnectionStep.Scanning,
+                        detail = "Looking for nearby cameras with a fake local state machine.",
+                        canCancel = true,
+                    )
+                delay(200)
+                mutableState.value =
+                    ConnectionUiState(
+                        step = ConnectionStep.CameraFound,
+                        detail = "Placeholder X-T5 profile found. Real scan support is not implemented yet.",
+                        canCancel = true,
+                    )
             }
         }
     }
-
-    private fun startPlaceholderScan() {
-        viewModelScope.launch {
-            mutableState.value = ConnectionUiState(
-                step = ConnectionStep.Scanning,
-                detail = "Looking for nearby cameras with a fake local state machine.",
-                canCancel = true,
-            )
-            delay(200)
-            mutableState.value = ConnectionUiState(
-                step = ConnectionStep.CameraFound,
-                detail = "Placeholder X-T5 profile found. Real scan support is not implemented yet.",
-                canCancel = true,
-            )
-        }
-    }
-}
 
 @Composable
 fun CameraScanRoute(
@@ -125,11 +146,12 @@ fun CameraConnectRoute(
         }
     }
     ConnectionScreen(
-        state = state.copy(
-            step = ConnectionStep.RequestingWifi,
-            detail = "Manual connection placeholder. Real Wi-Fi routing and native sessions are not implemented yet.",
-            canCancel = true,
-        ),
+        state =
+            state.copy(
+                step = ConnectionStep.RequestingWifi,
+                detail = "Manual connection placeholder. Real Wi-Fi routing and native sessions are not implemented yet.",
+                canCancel = true,
+            ),
         onAction = viewModel::onAction,
     )
 }
@@ -162,11 +184,12 @@ fun ConnectionScreen(
 private fun ConnectionScreenPreview() {
     FrameportTheme {
         ConnectionScreen(
-            state = ConnectionUiState(
-                step = ConnectionStep.CameraFound,
-                detail = "Placeholder X-T5 profile found.",
-                canCancel = true,
-            ),
+            state =
+                ConnectionUiState(
+                    step = ConnectionStep.CameraFound,
+                    detail = "Placeholder X-T5 profile found.",
+                    canCancel = true,
+                ),
             onAction = {},
         )
     }

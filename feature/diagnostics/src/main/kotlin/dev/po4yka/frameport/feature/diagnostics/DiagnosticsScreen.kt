@@ -7,7 +7,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.po4yka.frameport.camera.api.CameraDiagnosticsRepository
+import dev.po4yka.frameport.camera.api.DiagnosticsRepository
 import dev.po4yka.frameport.core.designsystem.FrameportCard
 import dev.po4yka.frameport.core.designsystem.FrameportScreen
 import dev.po4yka.frameport.core.designsystem.FrameportTheme
@@ -18,14 +18,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 
 data class DiagnosticsUiState(
-    val categories: List<String> = listOf(
-        "Permissions",
-        "Bluetooth",
-        "Wi-Fi",
-        "Native SDK",
-        "Camera protocol",
-        "Storage",
-    ),
+    val categories: List<String> =
+        listOf(
+            "Permissions",
+            "Bluetooth",
+            "Wi-Fi",
+            "Native SDK",
+            "Camera protocol",
+            "Storage",
+        ),
     val privacyNote: String = "Diagnostics are local-only. Sensitive values must be redacted before any future export.",
 )
 
@@ -34,18 +35,20 @@ sealed interface DiagnosticsAction {
 }
 
 @HiltViewModel
-class DiagnosticsViewModel @Inject constructor(
-    private val diagnosticsRepository: CameraDiagnosticsRepository,
-) : ViewModel() {
-    private val mutableState = MutableStateFlow(DiagnosticsUiState())
-    val uiState: StateFlow<DiagnosticsUiState> = mutableState.asStateFlow()
+class DiagnosticsViewModel
+    @Inject
+    constructor(
+        private val diagnosticsRepository: DiagnosticsRepository,
+    ) : ViewModel() {
+        private val mutableState = MutableStateFlow(DiagnosticsUiState())
+        val uiState: StateFlow<DiagnosticsUiState> = mutableState.asStateFlow()
 
-    fun onAction(action: DiagnosticsAction) {
-        when (action) {
-            DiagnosticsAction.Refresh -> mutableState.value = DiagnosticsUiState()
+        fun onAction(action: DiagnosticsAction) {
+            when (action) {
+                DiagnosticsAction.Refresh -> mutableState.value = DiagnosticsUiState()
+            }
         }
     }
-}
 
 @Composable
 fun DiagnosticsRoute(viewModel: DiagnosticsViewModel = hiltViewModel()) {

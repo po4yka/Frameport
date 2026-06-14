@@ -7,7 +7,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.po4yka.frameport.camera.api.CameraRepository
+import dev.po4yka.frameport.camera.api.MediaRepository
 import dev.po4yka.frameport.core.designsystem.EmptyState
 import dev.po4yka.frameport.core.designsystem.FrameportCard
 import dev.po4yka.frameport.core.designsystem.FrameportScreen
@@ -27,21 +27,26 @@ sealed interface GalleryAction {
 }
 
 @HiltViewModel
-class GalleryViewModel @Inject constructor(
-    private val cameraRepository: CameraRepository,
-) : ViewModel() {
-    private val mutableState = MutableStateFlow(GalleryUiState())
-    val uiState: StateFlow<GalleryUiState> = mutableState.asStateFlow()
+class GalleryViewModel
+    @Inject
+    constructor(
+        private val mediaRepository: MediaRepository,
+    ) : ViewModel() {
+        private val mutableState = MutableStateFlow(GalleryUiState())
+        val uiState: StateFlow<GalleryUiState> = mutableState.asStateFlow()
 
-    fun onAction(action: GalleryAction) {
-        when (action) {
-            GalleryAction.Refresh -> mutableState.value = GalleryUiState(
-                itemCount = 0,
-                message = "No fake camera media is available yet.",
-            )
+        fun onAction(action: GalleryAction) {
+            when (action) {
+                GalleryAction.Refresh -> {
+                    mutableState.value =
+                        GalleryUiState(
+                            itemCount = 0,
+                            message = "No fake camera media is available yet.",
+                        )
+                }
+            }
         }
     }
-}
 
 @Composable
 fun GalleryRoute(viewModel: GalleryViewModel = hiltViewModel()) {

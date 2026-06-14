@@ -1,13 +1,21 @@
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt)
 }
 
 android {
     namespace = "dev.po4yka.frameport.camera.data"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
-        minSdk = libs.versions.minSdk.get().toInt()
+        minSdk =
+            libs.versions.minSdk
+                .get()
+                .toInt()
     }
 
     compileOptions {
@@ -34,4 +42,6 @@ dependencies {
     implementation(projects.core.common)
     implementation(projects.core.model)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.hilt.android)
+    ksp(libs.androidx.hilt.compiler)
 }

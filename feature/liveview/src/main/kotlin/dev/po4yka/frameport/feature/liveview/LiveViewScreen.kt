@@ -7,7 +7,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.po4yka.frameport.camera.api.CameraConnectionManager
+import dev.po4yka.frameport.camera.api.CameraRepository
 import dev.po4yka.frameport.core.designsystem.EmptyState
 import dev.po4yka.frameport.core.designsystem.FrameportCard
 import dev.po4yka.frameport.core.designsystem.FrameportScreen
@@ -27,18 +27,20 @@ sealed interface LiveViewAction {
 }
 
 @HiltViewModel
-class LiveViewViewModel @Inject constructor(
-    private val cameraConnectionManager: CameraConnectionManager,
-) : ViewModel() {
-    private val mutableState = MutableStateFlow(LiveViewUiState())
-    val uiState: StateFlow<LiveViewUiState> = mutableState.asStateFlow()
+class LiveViewViewModel
+    @Inject
+    constructor(
+        private val cameraRepository: CameraRepository,
+    ) : ViewModel() {
+        private val mutableState = MutableStateFlow(LiveViewUiState())
+        val uiState: StateFlow<LiveViewUiState> = mutableState.asStateFlow()
 
-    fun onAction(action: LiveViewAction) {
-        when (action) {
-            LiveViewAction.Refresh -> mutableState.value = LiveViewUiState()
+        fun onAction(action: LiveViewAction) {
+            when (action) {
+                LiveViewAction.Refresh -> mutableState.value = LiveViewUiState()
+            }
         }
     }
-}
 
 @Composable
 fun LiveViewRoute(viewModel: LiveViewViewModel = hiltViewModel()) {
