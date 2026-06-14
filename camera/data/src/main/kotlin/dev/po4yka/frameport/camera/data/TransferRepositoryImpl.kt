@@ -1,18 +1,16 @@
 package dev.po4yka.frameport.camera.data
 
+import dev.po4yka.frameport.camera.api.CameraMediaFormat
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
 import dev.po4yka.frameport.camera.api.FujiNativeSdk
 import dev.po4yka.frameport.camera.api.ImportState
 import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.camera.api.TransferId
-import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.camera.api.TransferRepository
+import dev.po4yka.frameport.camera.media.MediaStoreWriter
 import dev.po4yka.frameport.core.common.di.IoDispatcher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -20,43 +18,39 @@ import javax.inject.Singleton
 /**
  * Production implementation of [TransferRepository].
  *
- * Maps [FujiNativeSdk.downloadObjectToFd] [TransferProgress] emissions to [ImportState]:
- * - Each progress emission -> [ImportState.Running].
- * - On completion (no more emissions) -> [ImportState.Imported] with a placeholder URI.
- * - On error -> [ImportState.Failed].
+ * Delegates the full import lifecycle — MediaStore row creation, fd hand-off to Rust,
+ * progress collection, finalize/cleanup, and ImportCatalog recording — to [MediaStoreWriter].
  *
- * fd ownership: [outputFd] passed to [FujiNativeSdk.downloadObjectToFd] must be an owned,
- * dup'd fd. Rust closes its copy; the Android side (MediaStore) closes its original.
+ * Format: the [TransferRepository] interface only carries [SessionId] and [CameraObjectHandle];
+ * the media format is not yet threaded through from the UI selection layer. [CameraMediaFormat.Unknown]
+ * is passed for now.
+ * TODO: thread the real [CameraMediaFormat] once the import UI selects a [CameraMediaObject]
+ *   and passes its format through [TransferRepository.importObject] (requires interface change in M10).
+ *
+ * fd ownership: [MediaStoreWriter] owns the ParcelFileDescriptor lifecycle. Rust borrows the
+ * raw fd integer and closes only its own dup; Android closes the original pfd after transfer.
  * See docs/rust/fd-ownership.md and ADR-0002.
- *
- * TODO(M09): Replace placeholder localUri with a real MediaStore content URI produced by
- *   the media import writer after the fd write completes.
- * TODO(M09): Wire real outputFd from MediaStore ParcelFileDescriptor.
- * TODO(M09): Emit a final Imported(localUri) via onCompletion once the fd-write path lands.
  */
 @Singleton
 class TransferRepositoryImpl
     @Inject
     constructor(
         private val fujiNativeSdk: FujiNativeSdk,
+        private val mediaStoreWriter: MediaStoreWriter,
         @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
     ) : TransferRepository {
-        // NOT cancel-safe: writes to outputFd; partial writes are not rolled back on cancellation. Caller must handle partial file cleanup.
+        // NOT cancel-safe: writes to outputFd via MediaStoreWriter; partial writes are not rolled back.
+        // MediaStoreWriter deletes the pending row on cancellation (best-effort cleanup).
         override fun importObject(
             sessionId: SessionId,
             handle: CameraObjectHandle,
-        ): Flow<ImportState> {
-            // TODO(M09): Obtain a real outputFd from MediaStore (IS_PENDING=1 -> write -> IS_PENDING=0).
-            val stubOutputFd = -1
-            return fujiNativeSdk
-                .downloadObjectToFd(sessionId, handle, stubOutputFd)
-                .map<TransferProgress, ImportState> { progress -> ImportState.Running(progress) }
-                .catch { throwable ->
-                    // Redact: unwrap a typed FrameportException or map to a redacted
-                    // Unknown — never propagate a raw native message (privacy).
-                    emit(ImportState.Failed(throwable.toRedactedFrameportError()))
-                }.flowOn(ioDispatcher)
-        }
+        ): Flow<ImportState> =
+            // TODO: thread real CameraMediaFormat once the import UI passes it through.
+            mediaStoreWriter.importToMediaStore(
+                sessionId = sessionId,
+                handle = handle,
+                format = CameraMediaFormat.Unknown,
+            )
 
         // cancel-safe: single delegated suspend call; idempotent if transferId is unknown.
         override suspend fun cancelImport(transferId: TransferId) {

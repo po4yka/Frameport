@@ -110,9 +110,13 @@ data class DiagnosticEvent(
 /**
  * Adapter interface for the Rust native SDK, owned by :camera:data.
  *
- * fd ownership contract: [socketFd] and [outputFd] are raw file-descriptor ints.
- * The caller MUST have dup'd the fd before passing it here; Rust takes ownership
- * and closes its copy. The Android side must close its own original separately.
+ * fd ownership contract for [socketFd]: the caller must have dup'd the fd before passing it;
+ * Rust takes ownership and closes its copy. The Android side closes its own original separately.
+ *
+ * fd ownership contract for [outputFd] (see [downloadObjectToFd]):
+ * [outputFd] is ANDROID-OWNED and BORROWED by Rust. Rust dups the fd internally and closes only
+ * its own dup. Android must NOT call detachFd() and must close the original ParcelFileDescriptor
+ * after the transfer terminates (success, failure, or cancellation).
  * See docs/rust/fd-ownership.md and ADR-0002.
  */
 interface FujiNativeSdk {
@@ -139,7 +143,11 @@ interface FujiNativeSdk {
     ): Result<ByteArray>
 
     /**
-     * @param outputFd Owned, dup'd raw fd for the output file (MediaStore ParcelFileDescriptor). Rust closes this fd when done.
+     * @param outputFd Android-owned raw fd for the output file (from a MediaStore ParcelFileDescriptor).
+     *   Rust BORROWS this fd: it dups the fd internally and closes only its own dup.
+     *   Android MUST NOT call detachFd() and MUST close the original ParcelFileDescriptor after
+     *   the transfer terminates (success, failure, or cancellation).
+     *   See docs/rust/fd-ownership.md and ADR-0002.
      */
     // NOT cancel-safe: the underlying Rust transfer writes to outputFd; partial writes are not rolled back on cancellation. Caller must handle partial file cleanup.
     fun downloadObjectToFd(

@@ -8,8 +8,6 @@ import dev.po4yka.frameport.camera.bluetooth.FujiBleClient
 import dev.po4yka.frameport.camera.bluetooth.NoOpFujiBleClient
 import dev.po4yka.frameport.camera.diagnostics.DiagnosticEventSink
 import dev.po4yka.frameport.camera.diagnostics.NoOpDiagnosticEventSink
-import dev.po4yka.frameport.camera.media.MediaImportWriter
-import dev.po4yka.frameport.camera.media.NoOpMediaImportWriter
 import dev.po4yka.frameport.camera.usb.CameraUsbConnector
 import dev.po4yka.frameport.camera.usb.NoOpCameraUsbConnector
 import javax.inject.Singleton
@@ -36,10 +34,6 @@ object CameraBindingsModule {
     @Provides
     @Singleton
     fun providesCameraUsbConnector(): CameraUsbConnector = NoOpCameraUsbConnector()
-
-    @Provides
-    @Singleton
-    fun providesMediaImportWriter(): MediaImportWriter = NoOpMediaImportWriter()
 
     @Provides
     @Singleton

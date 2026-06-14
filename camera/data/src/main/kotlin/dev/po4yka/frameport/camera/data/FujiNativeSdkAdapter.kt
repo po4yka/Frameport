@@ -37,8 +37,10 @@ import javax.inject.Singleton
  * returns Result<Unit>. This adapter emits a single terminal [TransferProgress] stub.
  * TODO(M09): Replace with a real streaming progress callback from Rust JNI.
  *
- * fd ownership: the caller must have dup'd the fd before passing it in. Rust takes
- * ownership and closes its copy. See docs/rust/fd-ownership.md and ADR-0002.
+ * fd ownership for [downloadObjectToFd]: [outputFd] is ANDROID-OWNED and BORROWED by Rust.
+ * Rust dups the fd internally and closes only its own dup. Android must NOT call detachFd()
+ * and must close the original ParcelFileDescriptor after the transfer terminates.
+ * See docs/rust/fd-ownership.md and ADR-0002.
  */
 @Singleton
 class FujiNativeSdkAdapter

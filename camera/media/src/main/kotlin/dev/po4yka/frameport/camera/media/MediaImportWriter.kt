@@ -1,28 +1,11 @@
 package dev.po4yka.frameport.camera.media
 
-import dev.po4yka.frameport.core.model.ImportStatus
-import dev.po4yka.frameport.core.model.MediaObject
-
-interface MediaImportWriter {
-    suspend fun prepare(mediaObject: MediaObject): Result<MediaImportTarget>
-
-    suspend fun markComplete(target: MediaImportTarget): Result<ImportStatus>
-
-    suspend fun markFailed(target: MediaImportTarget, reason: Throwable): Result<ImportStatus>
-}
-
-data class MediaImportTarget(
-    val id: String,
-    val ownedFileDescriptor: Int,
-)
-
-class NoOpMediaImportWriter : MediaImportWriter {
-    override suspend fun prepare(mediaObject: MediaObject): Result<MediaImportTarget> =
-        Result.failure(IllegalStateException("Media import writing is not implemented."))
-
-    override suspend fun markComplete(target: MediaImportTarget): Result<ImportStatus> =
-        Result.failure(IllegalStateException("Media import writing is not implemented."))
-
-    override suspend fun markFailed(target: MediaImportTarget, reason: Throwable): Result<ImportStatus> =
-        Result.failure(IllegalStateException("Media import writing is not implemented."))
-}
+// This file is intentionally empty. The placeholder MediaImportWriter interface and
+// NoOpMediaImportWriter class that existed here in M08 have been superseded by
+// MediaStoreWriter (interface) and MediaStoreWriterImpl (implementation) in M09.
+//
+// MediaStoreWriter owns the full ADR-0004 import lifecycle:
+//   create pending row → open write fd → borrow fd to Rust → collect progress →
+//   finalize/delete pending → record in ImportCatalog → emit ImportState.
+//
+// See MediaStoreWriter.kt and MediaStoreWriterImpl.kt in this package.
