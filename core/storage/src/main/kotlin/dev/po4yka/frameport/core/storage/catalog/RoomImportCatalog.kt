@@ -27,6 +27,7 @@ class RoomImportCatalog
             mediaStoreUri: String,
             capturedAtEpochMillis: Long?,
             importedAtEpochMillis: Long,
+            importSessionId: Long?,
         ) {
             dao.upsert(
                 ImportedMediaEntity(
@@ -38,6 +39,7 @@ class RoomImportCatalog
                     importStatus = ImportCatalogStatus.IMPORTED,
                     capturedAtEpochMillis = capturedAtEpochMillis,
                     importedAtEpochMillis = importedAtEpochMillis,
+                    importSessionId = importSessionId,
                 ),
             )
         }
@@ -55,6 +57,7 @@ class RoomImportCatalog
                     importStatus = entity.importStatus,
                     capturedAtEpochMillis = entity.capturedAtEpochMillis,
                     importedAtEpochMillis = entity.importedAtEpochMillis,
+                    importSessionId = entity.importSessionId,
                 )
             }
     }

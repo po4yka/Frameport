@@ -18,6 +18,10 @@ interface ImportCatalog {
      * @param mediaStoreUri The MediaStore content:// URI string for the imported file.
      * @param capturedAtEpochMillis UTC millis when the image was captured; null if unknown.
      * @param importedAtEpochMillis UTC millis when this import completed.
+     * @param importSessionId The active camera session id under which this object was imported,
+     *   or null when session tracking is unavailable. Stored in [ImportedMediaEntity.importSessionId]
+     *   and used by [RoomLocalTimelineStore] to group rows under "session:<id>" keys. Rows without
+     *   a session id fall back to calendar-day bucketing ("day:<yyyy-MM-dd>").
      */
     // cancel-safe: delegates to a Room suspend DAO call; cancellation propagates cleanly.
     suspend fun recordImport(
@@ -28,6 +32,7 @@ interface ImportCatalog {
         mediaStoreUri: String,
         capturedAtEpochMillis: Long?,
         importedAtEpochMillis: Long,
+        importSessionId: Long? = null,
     )
 
     /**
@@ -53,4 +58,6 @@ data class ImportCatalogEntry(
     val importStatus: String,
     val capturedAtEpochMillis: Long?,
     val importedAtEpochMillis: Long,
+    /** The session id under which this object was imported; null for pre-M18 rows. */
+    val importSessionId: Long? = null,
 )

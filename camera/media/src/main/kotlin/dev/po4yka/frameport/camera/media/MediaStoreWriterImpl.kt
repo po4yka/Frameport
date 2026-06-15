@@ -151,6 +151,7 @@ class MediaStoreWriterImpl
                         mediaStoreUri = uri,
                         capturedAtEpochMillis = null,
                         importedAtEpochMillis = Instant.now().toEpochMilli(),
+                        importSessionId = sessionId.value,
                     )
                 }
 

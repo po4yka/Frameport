@@ -83,7 +83,7 @@ class MediaStoreWriterImplTest {
             }
 
             // Catalog must have been recorded
-            coVerify { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any()) }
+            coVerify { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any(), any()) }
             // Pending row must be finalised (not deleted)
             assertTrue(fakeGateway.finalised)
             assertFalse(fakeGateway.deleted)
@@ -146,7 +146,7 @@ class MediaStoreWriterImplTest {
             assertFalse(fakeGateway.finalised)
             assertTrue(fakeGateway.pfdClosed)
             // Catalog must NOT be recorded on failure
-            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any(), any()) }
         }
 
     // ─── Failure: gateway insert returns null ─────────────────────────────────
@@ -166,7 +166,7 @@ class MediaStoreWriterImplTest {
 
             assertFalse(fakeGateway.fdOpened)
             assertFalse(fakeGateway.deleted)
-            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any(), any()) }
         }
 
     // ─── Failure: openWriteFd returns null ────────────────────────────────────
@@ -184,7 +184,7 @@ class MediaStoreWriterImplTest {
 
             assertTrue(fakeGateway.deleted)
             assertFalse(fakeGateway.finalised)
-            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any(), any()) }
         }
 
     // ─── Privacy invariants ───────────────────────────────────────────────────
@@ -265,7 +265,7 @@ class MediaStoreWriterImplTest {
             // PFD must be closed even on cancellation (Android owns the fd, not Rust).
             assertTrue("pfd must be closed on cancellation", fakeGateway.pfdClosed)
             // Catalog must not be recorded on cancellation.
-            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { mockCatalog.recordImport(any(), any(), any(), any(), any(), any(), any(), any()) }
         }
 
     // ─── fd ownership invariant (G1 leak guard) ────────────────────────────
@@ -401,6 +401,7 @@ private class NoOpImportCatalog : ImportCatalog {
         mediaStoreUri: String,
         capturedAtEpochMillis: Long?,
         importedAtEpochMillis: Long,
+        importSessionId: Long?,
     ) = Unit
 
     override suspend fun recentImports(limit: Int): List<ImportCatalogEntry> = emptyList()
