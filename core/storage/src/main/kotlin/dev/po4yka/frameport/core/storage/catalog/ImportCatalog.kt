@@ -38,6 +38,10 @@ interface ImportCatalog {
     /**
      * Returns the [limit] most recently imported entries as [ImportCatalogEntry] records,
      * ordered by import time descending.
+     *
+     * [limit] must be positive. A value of zero or less is coerced to 1 by implementations
+     * to prevent SQLite from interpreting a negative LIMIT as "no limit" (which would return
+     * the entire table without a bound).
      */
     // cancel-safe: delegates to a Room suspend DAO call; cancellation propagates cleanly.
     suspend fun recentImports(limit: Int): List<ImportCatalogEntry>

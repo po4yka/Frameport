@@ -46,7 +46,9 @@ class RoomImportCatalog
 
         // cancel-safe: delegates to a Room suspend DAO call; cancellation propagates cleanly.
         override suspend fun recentImports(limit: Int): List<ImportCatalogEntry> =
-            dao.recentImports(limit).map { entity ->
+            // Guard: SQLite treats LIMIT with a negative value as "no limit" (returns the whole
+            // table). Coerce to a minimum of 1 so the DAO always receives a positive bound.
+            dao.recentImports(limit.coerceAtLeast(1)).map { entity ->
                 ImportCatalogEntry(
                     localId = entity.localId,
                     cameraObjectHandle = entity.cameraObjectHandle,
