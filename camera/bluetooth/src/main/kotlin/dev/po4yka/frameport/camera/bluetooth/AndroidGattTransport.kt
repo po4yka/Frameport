@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -72,9 +73,29 @@ internal class AndroidGattTransport
         @Volatile
         private var gatt: BluetoothGatt? = null
 
-        // Active pending deferred for the current GATT callback.
-        // Only one is active at a time (enforced by the actor).
-        @Volatile private var pendingConnect: CompletableDeferred<Unit>? = null
+        /**
+         * Monotonically increasing generation counter, incremented at the start of each [connect]
+         * call before [pendingConnectSlot] is installed. The GATT callback reads this value and
+         * compares it against [ConnectSlot.generation] to decide whether the callback belongs to
+         * the current connect attempt or a stale one from a previous call.
+         */
+        private val connectGeneration = AtomicInteger(0)
+
+        /**
+         * Pairs an expected generation with the deferred that [connect] is awaiting.
+         * Written by [connect] (actor thread) and read by [onConnectionStateChange] (BLE thread).
+         * [Volatile] ensures the BLE thread always sees the latest reference.
+         *
+         * A late [onConnectionStateChange] callback from a previous connect attempt carries a
+         * [ConnectSlot.generation] that is less than the current [connectGeneration] — it is
+         * silently dropped rather than completing the NEW deferred prematurely.
+         */
+        private data class ConnectSlot(
+            val generation: Int,
+            val deferred: CompletableDeferred<Unit>,
+        )
+
+        @Volatile private var pendingConnectSlot: ConnectSlot? = null
 
         @Volatile private var pendingServices: CompletableDeferred<Unit>? = null
 
@@ -99,7 +120,7 @@ internal class AndroidGattTransport
             targetDevice = device
         }
 
-        // cancel-safe: suspends on a CompletableDeferred; cancellation clears the pending ref.
+        // cancel-safe: suspends on a CompletableDeferred; cancellation clears pendingConnectSlot.
         @SuppressLint("MissingPermission")
         override suspend fun connect() {
             val device =
@@ -107,18 +128,22 @@ internal class AndroidGattTransport
                     "setTargetDevice must be called before connect()"
                 }
             val deferred = CompletableDeferred<Unit>()
-            pendingConnect = deferred
+            // Increment the generation BEFORE installing the slot. Any onConnectionStateChange
+            // callback that fires with a stale (lower) generation value will see a mismatch
+            // when it reads pendingConnectSlot.generation and will be silently dropped.
+            val generation = connectGeneration.incrementAndGet()
+            pendingConnectSlot = ConnectSlot(generation, deferred)
             withContext(ioDispatcher) {
                 // connectGatt with autoConnect=false for manual reconnect control.
                 // Privacy: device address not logged.
-                Timber.d("BLE: initiating GATT connect")
+                Timber.d("BLE: initiating GATT connect generation=$generation")
                 gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
                     ?: throw IllegalStateException("connectGatt returned null")
             }
             try {
                 deferred.await()
             } finally {
-                pendingConnect = null
+                pendingConnectSlot = null
             }
         }
 
@@ -313,16 +338,36 @@ internal class AndroidGattTransport
                     // Privacy: gatt.device.address is NOT logged.
                     when (newState) {
                         BluetoothProfile.STATE_CONNECTED -> {
-                            Timber.d("BLE: GATT state=CONNECTED status=$status")
-                            _connectionState.value = BleConnectionState.Connecting
-                            pendingConnect?.complete(Unit)
+                            // Read the current slot atomically. The slot carries both the expected
+                            // generation and the deferred, so we can check them together.
+                            val slot = pendingConnectSlot
+                            val currentGen = connectGeneration.get()
+                            Timber.d("BLE: GATT state=CONNECTED status=$status generation=$currentGen")
+                            // STATE_CONNECTED means the link-layer connection is up; service
+                            // discovery and MTU negotiation still need to run before the session
+                            // is fully ready. Emit Connected at the transport layer so that the
+                            // upper client (AndroidFujiBleClient) can proceed with discoverServices.
+                            // The client only advances its own observable state to Connected after
+                            // the full handshake (connect + discoverServices + requestMtu).
+                            _connectionState.value = BleConnectionState.Connected
+                            // Only resolve the deferred when the slot's generation matches the
+                            // current counter. A stale callback (slot.generation < currentGen)
+                            // from a previous connect attempt is silently dropped — it must not
+                            // complete the deferred that belongs to the newest attempt.
+                            if (slot != null && slot.generation == currentGen) {
+                                slot.deferred.complete(Unit)
+                            } else {
+                                Timber.d(
+                                    "BLE: stale CONNECTED callback dropped generation=${slot?.generation} current=$currentGen",
+                                )
+                            }
                         }
 
                         BluetoothProfile.STATE_DISCONNECTED -> {
                             Timber.d("BLE: GATT state=DISCONNECTED status=$status")
                             _connectionState.value = BleConnectionState.Disconnected
                             val err = IllegalStateException("GATT disconnected status=$status")
-                            pendingConnect?.completeExceptionally(err)
+                            pendingConnectSlot?.deferred?.completeExceptionally(err)
                             pendingServices?.completeExceptionally(err)
                             pendingMtu?.completeExceptionally(err)
                             pendingRead?.completeExceptionally(err)
