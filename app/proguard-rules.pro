@@ -41,7 +41,13 @@
 # --- Hilt: consumer rules from hilt-android AAR cover the generated components ---
 # Do not duplicate Hilt keep rules here; they are shipped as R8 consumer rules in the AAR.
 
-# --- Timber: strip debug logging in release builds ---
+# --- Timber: strip verbose and debug log calls in release builds ---
+# v() and d() are removed entirely by R8 (-assumenosideeffects treats them as side-effect-free).
+# w(), e(), and wtf() are intentionally retained in release: they indicate warnings and errors
+# that are useful for diagnosing production issues without exposing user-identifying data.
+# i() is also retained so informational lifecycle events remain visible in release logs.
+# This is the correct privacy-first posture: verbose/debug output is stripped, structured
+# warning/error output is preserved for triage.
 -assumenosideeffects class timber.log.Timber {
     public static *** v(...);
     public static *** d(...);
