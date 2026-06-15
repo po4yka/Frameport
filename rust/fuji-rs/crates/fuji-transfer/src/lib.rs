@@ -142,7 +142,13 @@ pub fn list_media(t: &mut dyn CommandTransport) -> FujiResult<Vec<CameraMediaObj
         })?;
 
         let format = CameraMediaFormat::from_wire_code(info.object_format as u32);
-        let size_bytes = Some(info.object_compressed_size as u64);
+        // 0xFFFF_FFFF is the PTP sentinel for "size unknown / larger than 4 GiB".
+        // Treat it as unknown rather than a literal 4 GiB - 1 byte count.
+        let size_bytes = if info.object_compressed_size == u32::MAX {
+            None
+        } else {
+            Some(info.object_compressed_size as u64)
+        };
         let capture_date_utc = parse_ptp_date(&info.capture_date);
         let filename_opaque_hash = if info.filename.is_empty() {
             None
@@ -246,7 +252,15 @@ pub fn download_to_owned_fd(
             minimum: fuji_ptp::object_info::OBJECT_INFO_FIXED_BYTES as u32,
         })
     })?;
-    let expected = info.object_compressed_size as u64;
+    // 0xFFFF_FFFF is the PTP sentinel meaning "size unknown / larger than 4 GiB".
+    // Storing it as a u64 byte count (4_294_967_295) would cause a spurious
+    // SizeMismatch on every object whose real size is not exactly 4 GiB - 1.
+    // Use None to signal "unknown" and skip the exact-size integrity check.
+    let expected: Option<u64> = if info.object_compressed_size == u32::MAX {
+        None
+    } else {
+        Some(info.object_compressed_size as u64)
+    };
 
     // Wrap OwnedFd as a BufWriter<File>.  File::from(OwnedFd) is safe: OwnedFd
     // guarantees ownership of the fd; File takes ownership and closes it on drop.
@@ -288,7 +302,8 @@ pub fn download_to_owned_fd(
 
         let progress = TransferProgress {
             bytes_transferred: bytes_written,
-            total_bytes: expected,
+            // Use 0 as total_bytes sentinel when size is unknown (PTP 0xFFFF_FFFF).
+            total_bytes: expected.unwrap_or(0),
             object_handle,
             transfer_id,
         };
@@ -309,17 +324,18 @@ pub fn download_to_owned_fd(
     // Drop writer — closes fd.
     drop(writer);
 
-    // Integrity check: bytes written must equal the size declared in ObjectInfo.
-    if bytes_written != expected {
+    // Integrity check: skip when expected size is unknown (PTP sentinel 0xFFFF_FFFF),
+    // as the camera does not know the exact byte count in that case.
+    if let Some(expected_bytes) = expected.filter(|&e| bytes_written != e) {
         return Err(FujiError::Transfer(TransferError::SizeMismatch {
-            expected,
+            expected: expected_bytes,
             actual: bytes_written,
         }));
     }
 
     Ok(TransferProgress {
         bytes_transferred: bytes_written,
-        total_bytes: expected,
+        total_bytes: expected.unwrap_or(0),
         object_handle,
         transfer_id,
     })
