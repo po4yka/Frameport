@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import timber.log.Timber
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -79,8 +80,14 @@ class AndroidFujiBleClient
          * (never more than a handful of ops queued in normal usage). Channel.RENDEZVOUS would
          * force callers to suspend until the actor is ready; Channel(64) lets callers enqueue
          * quickly and suspend only on the deferred result.
+         *
+         * Declared as `var` so that [processDisconnect] can close the exhausted channel and
+         * [ensureActorRunning] can install a fresh one before restarting the actor on reconnect.
+         * Reads/writes are always guarded by [actorRunning] and the state machine, which together
+         * ensure the field is never swapped while the actor is actively draining it.
          */
-        private val operationQueue = Channel<GattOperation>(capacity = 64)
+        @Volatile
+        private var operationQueue = Channel<GattOperation>(capacity = 64)
 
         /** Scope that owns the actor and any scan-to-connect flows. */
         private val clientScope = CoroutineScope(ioDispatcher + SupervisorJob())
@@ -89,12 +96,19 @@ class AndroidFujiBleClient
         @Volatile
         private var actorJob: Job? = null
 
+        /**
+         * Guards actor start/stop so the actor coroutine is never double-started.
+         * Set to `true` by [ensureActorRunning] before launching and reset to `false` by
+         * [processDisconnect] after the channel is closed and the actor loop exits.
+         */
+        private val actorRunning = AtomicBoolean(false)
+
         /** Current target camera (set during [connect], cleared on [disconnect]). */
         @Volatile
         private var targetCamera: BleCameraRef? = null
 
         init {
-            startActor()
+            ensureActorRunning()
         }
 
         // -------------------------------------------------------------------------
@@ -110,6 +124,16 @@ class AndroidFujiBleClient
          * cancel-safe: the deferred is completed by the actor. If the caller's coroutine is
          * cancelled before the actor processes the operation, the deferred is never resolved but
          * the coroutine completes with CancellationException normally.
+         *
+         * Reconnect behaviour: if the client is in [BleConnectionState.Disconnected] and the
+         * previous actor has stopped (channel closed after disconnect), this call installs a fresh
+         * [operationQueue] and restarts the actor before enqueuing — making reconnect possible
+         * for the lifetime of the [Singleton] without creating a new instance.
+         *
+         * State ordering: [_connectionState] is only advanced to [BleConnectionState.Connecting]
+         * AFTER the operation is successfully enqueued. On enqueue failure the state is rolled
+         * back to [BleConnectionState.Disconnected] so the caller can observe the failure without
+         * the state being stranded at Connecting indefinitely.
          */
         override suspend fun connect(camera: BleCameraRef): Result<Unit> {
             if (_connectionState.value == BleConnectionState.Failed) {
@@ -117,12 +141,26 @@ class AndroidFujiBleClient
                     IllegalStateException("BLE client is in terminal Failed state. Create a new session."),
                 )
             }
+
+            // Restart actor if it stopped after a previous disconnect.
+            ensureActorRunning()
+
             targetCamera = camera
+            val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val op = GattOperation.Connect(deferred)
+
+            // Enqueue BEFORE mutating state so that a closed/full queue failure does not
+            // strand _connectionState at Connecting.
+            val enqueueResult = operationQueue.trySend(op)
+            if (enqueueResult.isFailure) {
+                deferred.completeExceptionally(BleOperationCancelled("Operation queue full or closed"))
+                return Result.failure(BleOperationCancelled("Operation queue full or closed — connect rejected"))
+            }
+
+            // Enqueue succeeded: now it is safe to advance the observable state.
             _connectionState.value = BleConnectionState.Connecting
 
-            val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
             return try {
-                enqueueOperation(GattOperation.Connect(deferred))
                 deferred.await()
                 Result.success(Unit)
             } catch (e: BleOperationCancelled) {
@@ -224,11 +262,21 @@ class AndroidFujiBleClient
         // -------------------------------------------------------------------------
 
         /**
-         * Single-actor coroutine that serializes all GATT operations.
-         * Only ONE operation is in flight at a time.
-         * All [gattTransport] method calls happen exclusively in this coroutine.
+         * Ensure the actor coroutine is running. Idempotent: if the actor is already alive
+         * ([actorRunning] == true) this is a no-op. If the previous session ended via
+         * [processDisconnect] (which closes the channel and clears [actorRunning]), this
+         * installs a fresh [operationQueue] and launches a new actor coroutine.
+         *
+         * Thread-safety: [AtomicBoolean.compareAndSet] guarantees at most one actor is started
+         * even under concurrent [connect] calls racing at session boundaries.
          */
-        private fun startActor() {
+        private fun ensureActorRunning() {
+            if (!actorRunning.compareAndSet(false, true)) {
+                // Actor is already running — nothing to do.
+                return
+            }
+            // Install a fresh channel so the new actor has a live, open queue.
+            operationQueue = Channel(capacity = 64)
             actorJob =
                 clientScope.launch {
                     Timber.d("BLE: actor started")
@@ -238,6 +286,9 @@ class AndroidFujiBleClient
                         if (operation is GattOperation.Disconnect) break
                     }
                     Timber.d("BLE: actor stopped")
+                    // actorRunning is reset inside processDisconnect (before the loop exits via
+                    // the Disconnect break above) so that ensureActorRunning can safely restart
+                    // on the next connect() call.
                 }
         }
 
@@ -349,11 +400,12 @@ class AndroidFujiBleClient
             gattTransport.disconnect()
             targetCamera = null
             _connectionState.value = BleConnectionState.Disconnected
-            // Close the queue: the actor stops after this op, so any operation enqueued
-            // afterwards must fail fast (trySend -> isFailure -> BleOperationCancelled in
-            // enqueueOperation) rather than block forever on a stopped actor. A new session
-            // requires a fresh client instance.
+            // Close the current channel so any trySend on the OLD queue fails fast.
+            // ensureActorRunning() will install a fresh Channel on the next connect() call.
             operationQueue.close()
+            // Clear the running flag BEFORE the actor loop exits so that a concurrent
+            // connect() racing here sees false and reinstalls the channel + actor cleanly.
+            actorRunning.set(false)
             Timber.d("BLE: disconnected")
         }
 
@@ -395,8 +447,10 @@ class AndroidFujiBleClient
         }
 
         /**
-         * Send an operation to the actor queue.
-         * Throws if the channel is closed (e.g. client scope was cancelled).
+         * Send an operation to the current actor queue. If the channel is closed or full,
+         * completes the operation's deferred with [BleOperationCancelled] so callers fail fast.
+         * Note: [connect] bypasses this helper and calls [operationQueue.trySend] directly so it
+         * can call [ensureActorRunning] and install a fresh channel before enqueuing.
          */
         private fun enqueueOperation(operation: GattOperation) {
             val result = operationQueue.trySend(operation)

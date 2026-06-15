@@ -357,6 +357,71 @@ class FujiBleClientTest {
 
             assertEquals(BleConnectionState.Disconnected, client.connectionState.value)
         }
+
+    // =========================================================================
+    // Reconnect-after-disconnect test (H-6 regression guard)
+    // =========================================================================
+
+    /**
+     * Verifies that a [Singleton] [AndroidFujiBleClient] can reconnect after a full
+     * disconnect — i.e. a second [connect] call succeeds after [disconnect] has closed
+     * the original actor channel and stopped the actor loop.
+     *
+     * Before the H-6 fix, [processDisconnect] permanently closed [operationQueue] and
+     * [startActor] ran only in `init`, so every reconnect attempt enqueued on a dead channel
+     * and failed for the process lifetime.
+     */
+    @Test
+    fun reconnectAfterDisconnectSucceeds() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+
+            // --- First session ---
+            fakeGattTransport.mutableConnectionState.value = BleConnectionState.Connected
+            val firstConnect = client.connect(camera)
+            advanceUntilIdle()
+
+            assertTrue("First connect must succeed", firstConnect.isSuccess)
+            assertEquals(BleConnectionState.Connected, client.connectionState.value)
+
+            // Disconnect — this closes the original operationQueue and stops the actor.
+            client.disconnect()
+            advanceUntilIdle()
+
+            assertEquals(
+                "State must be Disconnected after first disconnect",
+                BleConnectionState.Disconnected,
+                client.connectionState.value,
+            )
+
+            // Reset fake transport so it will accept a fresh connection.
+            fakeGattTransport.reset()
+            fakeGattTransport.mutableConnectionState.value = BleConnectionState.Connected
+
+            // --- Second session (reconnect) ---
+            // Before H-6 fix: this call would enqueue on the closed channel and always fail.
+            val secondConnect = client.connect(camera)
+            advanceUntilIdle()
+
+            assertTrue(
+                "Second connect must succeed after disconnect — reconnect must be possible",
+                secondConnect.isSuccess,
+            )
+            assertEquals(
+                "State must be Connected after successful reconnect",
+                BleConnectionState.Connected,
+                client.connectionState.value,
+            )
+
+            // Verify the actor is fully operational: a read after reconnect must work.
+            val expectedBytes = byteArrayOf(0xAB.toByte(), 0xCD.toByte())
+            fakeGattTransport.defaultReadResponse = expectedBytes
+            val readResult = client.read(CharacteristicId(BleConstants.CHR_CAMERA_VITAL_STATE))
+            advanceUntilIdle()
+
+            assertTrue("Read after reconnect must succeed", readResult.isSuccess)
+            assertArrayEquals(expectedBytes, readResult.getOrNull())
+        }
 }
 
 /**
