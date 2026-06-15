@@ -7,3 +7,6 @@ publish.workspace = true
 
 [dependencies]
 fuji-core.workspace = true
+
+[dev-dependencies]
+proptest = "1"

@@ -494,3 +494,104 @@ fn shooting_request_half_full_release_coverage_after_response_addition() {
         "S2FullPress must encode to [0x02, 0x00]"
     );
 }
+
+// ─── Proptest: advertisement parser panic-safety over arbitrary byte slices ───
+//
+// Required by llm-rust-prompts.md: BLE payload parsers that handle untrusted
+// bytes MUST have a proptest (or fuzz target) that asserts they never panic and
+// never read out of bounds for any input.
+//
+// Both public parser entry points are exercised:
+//   - `parse_manufacturer_payload`: receives the post-company-ID byte slice as
+//     delivered by the Android BLE stack.
+//   - `parse_raw_manufacturer_data`: receives the full manufacturer-specific
+//     data including the 2-byte company ID prefix.
+//
+// The invariant: for any &[u8] input the parser MUST return Ok(_) or a typed
+// FujiError::BleProtocol(_). It must NEVER panic, never abort, and never index
+// out of bounds.
+
+#[cfg(test)]
+mod proptest_advertisement {
+    use fuji_ble_protocol::advertisement::{parse_manufacturer_payload, parse_raw_manufacturer_data};
+    use fuji_core::FujiError;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Feed arbitrary byte slices to `parse_manufacturer_payload` and assert it
+        /// never panics and always returns a typed Ok or FujiError::BleProtocol.
+        #[test]
+        fn manufacturer_payload_never_panics_on_arbitrary_input(
+            bytes in proptest::collection::vec(any::<u8>(), 0..=64)
+        ) {
+            match parse_manufacturer_payload(&bytes) {
+                Ok(_) => {}
+                Err(FujiError::BleProtocol(_)) => {}
+                Err(other) => {
+                    panic!(
+                        "parse_manufacturer_payload returned unexpected error variant: {other:?}"
+                    );
+                }
+            }
+        }
+
+        /// Feed arbitrary byte slices to `parse_raw_manufacturer_data` and assert it
+        /// never panics and always returns a typed Ok or FujiError::BleProtocol.
+        #[test]
+        fn raw_manufacturer_data_never_panics_on_arbitrary_input(
+            bytes in proptest::collection::vec(any::<u8>(), 0..=64)
+        ) {
+            match parse_raw_manufacturer_data(&bytes) {
+                Ok(_) => {}
+                Err(FujiError::BleProtocol(_)) => {}
+                Err(other) => {
+                    panic!(
+                        "parse_raw_manufacturer_data returned unexpected error variant: {other:?}"
+                    );
+                }
+            }
+        }
+
+        /// Verify the boundary: exactly-minimum-length pairing-mode payloads parse
+        /// successfully, one-byte-short payloads return MalformedPayload.
+        #[test]
+        fn manufacturer_payload_pairing_mode_boundary(token in any::<[u8; 4]>()) {
+            // Exactly 5 bytes (1 type + 4 token) — must succeed.
+            let mut exact = [0u8; 5];
+            exact[0] = 0x02; // PAIRING_MODE_TYPE_BYTE
+            exact[1..5].copy_from_slice(&token);
+            assert!(
+                parse_manufacturer_payload(&exact).is_ok(),
+                "5-byte pairing payload must parse OK"
+            );
+
+            // 4 bytes (truncated by one) — must return MalformedPayload.
+            let truncated = &exact[..4];
+            assert!(
+                parse_manufacturer_payload(truncated).is_err(),
+                "4-byte pairing payload must return Err"
+            );
+        }
+
+        /// Verify that a correct Fujifilm company ID prefix with arbitrary payload
+        /// suffix never panics in `parse_raw_manufacturer_data`.
+        #[test]
+        fn raw_data_with_correct_company_id_never_panics(
+            suffix in proptest::collection::vec(any::<u8>(), 0..=32)
+        ) {
+            // Prepend the valid Fujifilm company ID (0x04D8 LE = [0xD8, 0x04]).
+            let mut bytes = Vec::with_capacity(2 + suffix.len());
+            bytes.push(0xD8);
+            bytes.push(0x04);
+            bytes.extend_from_slice(&suffix);
+            match parse_raw_manufacturer_data(&bytes) {
+                Ok(_) | Err(FujiError::BleProtocol(_)) => {}
+                Err(other) => {
+                    panic!(
+                        "parse_raw_manufacturer_data with valid company ID returned unexpected error: {other:?}"
+                    );
+                }
+            }
+        }
+    }
+}
