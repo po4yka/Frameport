@@ -268,19 +268,30 @@ class AndroidCameraUsbConnector
                     return@withContext Result.failure(IllegalStateException("UsbManager not available"))
                 }
 
-                // Fast path: permission already granted.
+                // U3: Register the deferred BEFORE checking hasPermission() and before calling
+                // requestPermission(). On some OEM devices the permission broadcast is delivered
+                // synchronously — i.e. handlePermissionResult() is called on the main thread
+                // before requestPermission() returns to us. If permissionDeferred were assigned
+                // after the hasPermission() check, a broadcast arriving in that window would find
+                // permissionDeferred == null, be silently dropped, and deferred.await() would
+                // suspend forever (until a detach completes it with false).
+                // Registering first makes handlePermissionResult() always find a live deferred.
+                val deferred = CompletableDeferred<Boolean>()
+                permissionDeferred = deferred
+                pendingPermissionDevice = usbDevice
+
+                // Fast path: permission was already granted (re-checked after the deferred is
+                // registered so a synchronous grant that arrived in the window above is not lost).
                 if (usbManager.hasPermission(usbDevice)) {
                     Timber.tag(TAG).d("requestPermission: already granted, key=%s", device.deviceKey)
+                    permissionDeferred = null
+                    pendingPermissionDevice = null
                     _state.value = UsbSessionState.OpeningDevice
                     return@withContext Result.success(Unit)
                 }
 
                 _state.value = UsbSessionState.PermissionPending
                 Timber.tag(TAG).d("requestPermission: requesting permission, key=%s", device.deviceKey)
-
-                val deferred = CompletableDeferred<Boolean>()
-                permissionDeferred = deferred
-                pendingPermissionDevice = usbDevice
 
                 val permissionIntent =
                     android.app.PendingIntent.getBroadcast(
@@ -293,6 +304,9 @@ class AndroidCameraUsbConnector
                     )
                 usbManager.requestPermission(usbDevice, permissionIntent)
 
+                // If the OEM delivered the broadcast synchronously within requestPermission(),
+                // deferred is already complete and await() returns immediately. Otherwise it
+                // suspends until handlePermissionResult() or handleDetached() completes it.
                 val granted = deferred.await()
 
                 if (!granted) {
