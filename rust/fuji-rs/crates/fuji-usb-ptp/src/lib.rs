@@ -1218,10 +1218,9 @@ mod tests {
         // a codec-level parse error (UnexpectedPacket), but never InvalidPacketLength
         // with `declared == at_cap`.
         match result {
-            Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
-                declared,
-                ..
-            })) if declared == at_cap => {
+            Err(FujiError::Protocol(ProtocolError::InvalidPacketLength { declared, .. }))
+                if declared == at_cap =>
+            {
                 panic!(
                     "cap check incorrectly fired for at-cap length {at_cap}; \
                      boundary must be > MAX_USB_PACKET_BYTES, not >="
