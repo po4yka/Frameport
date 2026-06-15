@@ -159,6 +159,12 @@ class AndroidCameraUsbConnector
             val displayName = "USB Device [${device.vendorId}:${device.productId}]"
             val ref = UsbDeviceRef(deviceKey = deviceKey, displayName = displayName)
 
+            // C6: A fresh attach starts a new device lifecycle. Reset closedOnce so that
+            // close() can tear down this new session cleanly. Without the reset, close() is a
+            // permanent no-op after any prior call (e.g. the user closed a previous session and
+            // then reconnected the device), which prevents clean teardown of subsequent sessions.
+            closedOnce.set(false)
+
             Timber.tag(TAG).d("handleAttached: device detected key=%s", deviceKey)
             _state.value = UsbSessionState.DeviceDetected(ref)
         }
