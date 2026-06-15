@@ -308,12 +308,12 @@ interface DiagnosticsRepository {
  * `privacy-local-first.md`. Never pass raw IP addresses, filenames, or
  * camera serial numbers as the message.
  */
-sealed class LiveViewUiState {
+sealed interface LiveViewUiState {
     /** No live-view session; initial and reset state. */
-    data object Idle : LiveViewUiState()
+    data object Idle : LiveViewUiState
 
     /** Socket is bound; waiting for the Rust read loop to emit the first frame. */
-    data object Connecting : LiveViewUiState()
+    data object Connecting : LiveViewUiState
 
     /**
      * Frames are being received and decoded.
@@ -325,10 +325,10 @@ sealed class LiveViewUiState {
     data class Streaming(
         val fps: Float,
         val dropCount: Long,
-    ) : LiveViewUiState()
+    ) : LiveViewUiState
 
     /** The session was stopped cleanly by the user or because the camera disconnected. */
-    data object Stopped : LiveViewUiState()
+    data object Stopped : LiveViewUiState
 
     /**
      * An unrecoverable error terminated the live-view session.
@@ -340,5 +340,5 @@ sealed class LiveViewUiState {
      */
     data class Error(
         val message: String,
-    ) : LiveViewUiState()
+    ) : LiveViewUiState
 }
