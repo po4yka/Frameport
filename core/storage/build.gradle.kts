@@ -30,6 +30,12 @@ android {
     }
 }
 
+ksp {
+    // Tell Room where to write schema JSON files. exportSchema = true in @Database requires
+    // this arg; without it KSP emits a warning and skips generation.
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(projects.core.model)
     implementation(libs.androidx.datastore)
@@ -47,4 +53,5 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.room.ktx)
+    androidTestImplementation(libs.androidx.room.testing)
 }

@@ -1,0 +1,240 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "604a479a500d8460d68175130f35f155",
+    "entities": [
+      {
+        "tableName": "imported_media",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`local_id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `camera_object_handle` INTEGER NOT NULL, `file_name_hash` TEXT, `format_category` TEXT NOT NULL, `size_bytes` INTEGER, `mediastore_uri` TEXT NOT NULL, `import_status` TEXT NOT NULL, `captured_at_epoch_millis` INTEGER, `imported_at_epoch_millis` INTEGER NOT NULL, `import_session_id` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "localId",
+            "columnName": "local_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cameraObjectHandle",
+            "columnName": "camera_object_handle",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileNameHash",
+            "columnName": "file_name_hash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "formatCategory",
+            "columnName": "format_category",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "size_bytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "mediaStoreUri",
+            "columnName": "mediastore_uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "importStatus",
+            "columnName": "import_status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAtEpochMillis",
+            "columnName": "captured_at_epoch_millis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "importedAtEpochMillis",
+            "columnName": "imported_at_epoch_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "importSessionId",
+            "columnName": "import_session_id",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "local_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_imported_media_camera_object_handle",
+            "unique": true,
+            "columnNames": [
+              "camera_object_handle"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_imported_media_camera_object_handle` ON `${TABLE_NAME}` (`camera_object_handle`)"
+          }
+        ]
+      },
+      {
+        "tableName": "session_progress",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`session_id` INTEGER NOT NULL, `object_handle` INTEGER NOT NULL, `bytes_transferred` INTEGER NOT NULL, `total_bytes` INTEGER NOT NULL, `state` TEXT NOT NULL, `updated_at_millis` INTEGER NOT NULL, PRIMARY KEY(`session_id`))",
+        "fields": [
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "objectHandle",
+            "columnName": "object_handle",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesTransferred",
+            "columnName": "bytes_transferred",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalBytes",
+            "columnName": "total_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMillis",
+            "columnName": "updated_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "session_id"
+          ]
+        }
+      },
+      {
+        "tableName": "recorded_exit_reason",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `recorded_at_millis` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordedAtMillis",
+            "columnName": "recorded_at_millis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "camera_profile",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`profile_id` TEXT NOT NULL, `camera_model` TEXT NOT NULL, `firmware_version` TEXT NOT NULL, `serial_hash` TEXT NOT NULL, `transport_capabilities` INTEGER NOT NULL, `compatibility_flags` INTEGER NOT NULL, `first_seen_epoch_ms` INTEGER NOT NULL, `last_seen_epoch_ms` INTEGER NOT NULL, `notes` TEXT, PRIMARY KEY(`profile_id`))",
+        "fields": [
+          {
+            "fieldPath": "profileId",
+            "columnName": "profile_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cameraModel",
+            "columnName": "camera_model",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firmwareVersion",
+            "columnName": "firmware_version",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "serialHash",
+            "columnName": "serial_hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transportCapabilities",
+            "columnName": "transport_capabilities",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "compatibilityFlags",
+            "columnName": "compatibility_flags",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstSeenEpochMs",
+            "columnName": "first_seen_epoch_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSeenEpochMs",
+            "columnName": "last_seen_epoch_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "profile_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_camera_profile_serial_hash",
+            "unique": true,
+            "columnNames": [
+              "serial_hash"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_camera_profile_serial_hash` ON `${TABLE_NAME}` (`serial_hash`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '604a479a500d8460d68175130f35f155')"
+    ]
+  }
+}

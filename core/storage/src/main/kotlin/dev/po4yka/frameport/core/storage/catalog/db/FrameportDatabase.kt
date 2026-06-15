@@ -33,7 +33,7 @@ import dev.po4yka.frameport.core.storage.session.db.SessionProgressEntity
         CameraProfileEntity::class,
     ],
     version = 3,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class FrameportDatabase : RoomDatabase() {
     abstract fun importCatalogDao(): ImportCatalogDao
