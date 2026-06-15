@@ -848,7 +848,21 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                 );
                 OK
             }
-            Err(_) => ERR_PANIC,
+            Err(_) => {
+                // OWNERSHIP/SAFETY: The registry mutex is poisoned, so this
+                // session can never be stopped via nativeLiveViewStop. To
+                // prevent the worker from running forever — holding the
+                // duplicated socket fd and the JVM GlobalRef — we signal it
+                // to stop and block until it exits before returning the error
+                // sentinel. Dropping join_handle without joining would leave
+                // an orphaned thread that leaks the fd and the GlobalRef for
+                // the process lifetime.
+                stop_flag.store(true, Ordering::SeqCst);
+                // join() returns Err only if the thread panicked; either way
+                // the thread has exited and released its resources.
+                let _ = join_handle.join();
+                ERR_PANIC
+            }
         }
     }));
 
