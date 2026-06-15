@@ -319,11 +319,9 @@ struct ObjectStream {
     txn_id: u32,
     /// Whether the EndData frame header (12 bytes) has been consumed.
     end_header_read: bool,
-    /// Remaining payload bytes inside the current EndData bulk packet.
-    ///
-    /// USB may deliver the EndData payload in multiple bulk reads.  This
-    /// tracks how many payload bytes of the current EndData frame remain.
-    frame_payload_remaining: u64,
+    // TODO(multi-block): USB may split the EndData payload across multiple bulk reads.
+    // Track frame_payload_remaining: u64 here and loop in read_object_chunk until the
+    // current EndData frame is drained before consuming the OperationResponse.
 }
 
 // ── UsbPtpSession ─────────────────────────────────────────────────────────────
@@ -574,7 +572,6 @@ impl CommandTransport for UsbPtpSession {
             remaining: total,
             txn_id: txn,
             end_header_read: false,
-            frame_payload_remaining: 0,
         });
 
         Ok(total)
@@ -629,7 +626,9 @@ impl CommandTransport for UsbPtpSession {
                 .as_mut()
                 .ok_or(FujiError::Protocol(ProtocolError::UnexpectedPacket))?;
             state.end_header_read = true;
-            state.frame_payload_remaining = payload_len;
+            // payload_len verified against state.total above; no further tracking needed
+            // until multi-block EndData support is added (see TODO in ObjectStream).
+            let _ = payload_len;
         }
 
         let state = self
