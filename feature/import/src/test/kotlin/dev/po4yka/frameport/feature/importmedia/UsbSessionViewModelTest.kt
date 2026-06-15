@@ -1,4 +1,4 @@
-package dev.po4yka.frameport.camera.usb
+package dev.po4yka.frameport.feature.importmedia
 
 import app.cash.turbine.test
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
@@ -9,7 +9,6 @@ import dev.po4yka.frameport.camera.api.UsbSessionError
 import dev.po4yka.frameport.camera.api.UsbSessionState
 import dev.po4yka.frameport.camera.api.UsbTransportHandle
 import dev.po4yka.frameport.camera.domain.ImportObjectUseCase
-import dev.po4yka.frameport.core.model.FrameportError
 import dev.po4yka.frameport.core.testing.FakeCameraUsbConnector
 import dev.po4yka.frameport.core.testing.FakeDiagnosticsRepository
 import dev.po4yka.frameport.core.testing.FakeTransferRepository

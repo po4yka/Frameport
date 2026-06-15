@@ -1,4 +1,4 @@
-package dev.po4yka.frameport.camera.usb
+package dev.po4yka.frameport.feature.importmedia
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -32,7 +32,7 @@ import javax.inject.Inject
  *
  * The [importState] flow is updated for every item imported via [importObject]. Only one
  * import is driven at a time; concurrent imports require a dedicated import queue ViewModel
- * (see [dev.po4yka.frameport.feature.importmedia.ImportViewModel]).
+ * (see [ImportViewModel]).
  */
 @HiltViewModel
 class UsbSessionViewModel

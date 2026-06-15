@@ -34,11 +34,9 @@ dependencies {
     implementation(projects.core.model)
     implementation(projects.core.common)
     implementation(projects.camera.api)
-    implementation(projects.camera.domain)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.hilt.android)
     implementation(libs.androidx.core)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.timber)
     ksp(libs.androidx.hilt.compiler)
 

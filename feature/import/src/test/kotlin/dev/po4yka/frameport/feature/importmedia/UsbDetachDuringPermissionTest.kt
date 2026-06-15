@@ -1,4 +1,4 @@
-package dev.po4yka.frameport.camera.usb
+package dev.po4yka.frameport.feature.importmedia
 
 import app.cash.turbine.test
 import dev.po4yka.frameport.camera.api.UsbDeviceRef
@@ -35,7 +35,7 @@ import org.junit.Test
  *
  * No Android framework, no UsbManager, no real BroadcastReceiver. The
  * [FakeCameraUsbConnector.simulateDetach] method mirrors the production
- * [AndroidCameraUsbConnector.handleDetached] logic.
+ * [dev.po4yka.frameport.camera.usb.AndroidCameraUsbConnector.handleDetached] logic.
  *
  * All tests run with [StandardTestDispatcher] for determinism.
  * Test naming: scenario_action_expectedOutcome.
