@@ -423,6 +423,37 @@ fn throw_native(env: &mut JNIEnv, message: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// JNI_OnLoad — cache JavaVM at library load time
+// ---------------------------------------------------------------------------
+
+/// Called by the JVM immediately after the native library is loaded via
+/// `System.loadLibrary`. Caches the `JavaVM` pointer in `JAVA_VM` so it is
+/// available before any other JNI entry point is called (in particular before
+/// `nativeLiveViewStart`, which previously was the only site that populated
+/// `JAVA_VM`). The lazy fallback inside `nativeLiveViewStart` is retained as
+/// defence-in-depth.
+///
+/// Returns `JNI_VERSION_1_6` on success. The JVM rejects any other value and
+/// immediately unloads the library. Panics are caught; on the panic path the
+/// library load still succeeds (returns `JNI_VERSION_1_6`) because the
+/// `JAVA_VM` fallback inside `nativeLiveViewStart` covers the miss.
+#[unsafe(no_mangle)]
+pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
+    // JNI_VERSION_1_6 = 0x00010006
+    const JNI_VERSION_1_6: jint = 0x0001_0006;
+
+    // Store the VM; ignore errors (mutex poison or panic) — the lazy fallback
+    // in nativeLiveViewStart will populate JAVA_VM on first liveview call.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(mut guard) = JAVA_VM.lock() {
+            *guard = Some(vm);
+        }
+    }));
+
+    JNI_VERSION_1_6
+}
+
+// ---------------------------------------------------------------------------
 // JNI exports — existing (unchanged)
 // ---------------------------------------------------------------------------
 
