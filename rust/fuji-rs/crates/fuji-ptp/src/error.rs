@@ -1,8 +1,8 @@
 //! Codec-level errors for PTP-IP packet encoding and decoding.
 //!
-//! These are distinct from the domain-level [`fuji_core::FujiError`]: they describe
-//! wire-format problems (truncated buffer, unknown type code, invalid UTF-16) rather
-//! than session or transport state.
+//! These errors describe wire-format problems (truncated buffer, unknown type
+//! code, invalid UTF-16) rather than session or transport state. Domain-level
+//! errors belong in `fuji-core::FujiError`.
 
 use thiserror::Error;
 
@@ -25,8 +25,4 @@ pub enum PtpCodecError {
     /// exceeds `usize::MAX`).
     #[error("length field overflows addressable range")]
     LengthOverflow,
-
-    /// Wraps a domain-level error propagated from `fuji-core`.
-    #[error(transparent)]
-    Fuji(#[from] fuji_core::FujiError),
 }

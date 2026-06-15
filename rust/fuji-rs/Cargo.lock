@@ -151,7 +151,6 @@ dependencies = [
 name = "fuji-ptp"
 version = "0.1.0"
 dependencies = [
- "fuji-core",
  "proptest",
  "thiserror 2.0.18",
 ]
