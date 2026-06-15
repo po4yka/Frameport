@@ -8,25 +8,47 @@ plugins {
 
 android {
     namespace = "dev.po4yka.frameport"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
         applicationId = "dev.po4yka.frameport"
-        minSdk = libs.versions.minSdk.get().toInt()
-        targetSdk = libs.versions.targetSdk.get().toInt()
+        minSdk =
+            libs.versions.minSdk
+                .get()
+                .toInt()
+        targetSdk =
+            libs.versions.targetSdk
+                .get()
+                .toInt()
         versionCode = 1
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        // TODO(release): replace debug signing with a real keystore before production release.
+        // Using the debug keystore allows assembleRelease to produce a signed APK for local
+        // verification without requiring a production keystore in CI.
+        getByName("debug") {
+            // Uses the default debug keystore (~/.android/debug.keystore); no overrides needed.
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 full mode is enabled globally via android.enableR8.fullMode=true in gradle.properties.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // TODO(release): replace debug signing with a real keystore.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -97,6 +119,13 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.timber)
     implementation(libs.coil.compose)
+
+    // M18: profileinstaller enables the seed baseline-prof.txt to be installed at APK install
+    // time, giving ART a warm start on first launch without needing a macrobenchmark run.
+    // M18: macrobenchmark/baseline-profile auto-generation deferred — androidx.baselineprofile /
+    // com.android.test module not wired against AGP 9.2.1 / compileSdk 37 in this milestone;
+    // seed baseline-prof.txt bundled via profileinstaller as a best-effort substitute.
+    implementation(libs.androidx.profileinstaller)
 
     ksp(libs.androidx.hilt.compiler)
     ksp(libs.androidx.room.compiler)

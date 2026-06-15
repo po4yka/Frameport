@@ -66,6 +66,12 @@ class SettingsViewModel
                     }
                 }
 
+                is SettingsAction.SetPreserveOriginalFilename -> {
+                    viewModelScope.launch {
+                        repository.setPreserveOriginalFilename(action.preserve)
+                    }
+                }
+
                 SettingsAction.Refresh -> {
                     // DataStore flow automatically re-emits on every write; nothing to do.
                 }

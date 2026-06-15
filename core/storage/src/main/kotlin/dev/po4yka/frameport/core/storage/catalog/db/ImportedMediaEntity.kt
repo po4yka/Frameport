@@ -67,6 +67,16 @@ data class ImportedMediaEntity(
     /** UTC epoch millis when the import completed in Frameport. */
     @ColumnInfo(name = "imported_at_epoch_millis")
     val importedAtEpochMillis: Long,
+    /**
+     * Optional link to the camera session during which this object was imported.
+     * Null for rows inserted before M18 or when session tracking is unavailable.
+     * Used by [RoomLocalTimelineStore] to group imports into [ImportSession] records.
+     *
+     * M18: populated by the import pipeline when a session id is available; pre-M18
+     * rows retain null and are bucketed by calendar day instead.
+     */
+    @ColumnInfo(name = "import_session_id")
+    val importSessionId: Long? = null,
 )
 
 /** Status strings persisted in [ImportedMediaEntity.importStatus]. */

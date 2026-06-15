@@ -40,6 +40,8 @@ dependencies {
     implementation(projects.camera.domain)
     implementation(projects.core.designsystem)
     implementation(projects.core.model)
+    // Local timeline feature reads import sessions from :core:storage via LocalTimelineStore.
+    implementation(projects.core.storage)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.runtime)

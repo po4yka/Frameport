@@ -5,6 +5,7 @@ import dev.po4yka.frameport.camera.api.CameraSessionState
 import dev.po4yka.frameport.camera.api.CameraWifiCredentials
 import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.core.model.FrameportError
+import dev.po4yka.frameport.core.testing.FakeCameraProfileRepository
 import dev.po4yka.frameport.core.testing.FakeCameraRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -17,6 +18,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class OpenCameraSessionUseCaseTest {
     private lateinit var fakeRepository: FakeCameraRepository
+    private lateinit var fakeProfileRepository: FakeCameraProfileRepository
     private lateinit var useCase: OpenCameraSessionUseCase
     private val testDispatcher = UnconfinedTestDispatcher()
 
@@ -25,7 +27,8 @@ class OpenCameraSessionUseCaseTest {
     @Before
     fun setUp() {
         fakeRepository = FakeCameraRepository()
-        useCase = OpenCameraSessionUseCase(fakeRepository, testDispatcher)
+        fakeProfileRepository = FakeCameraProfileRepository()
+        useCase = OpenCameraSessionUseCase(fakeRepository, fakeProfileRepository, testDispatcher)
     }
 
     @Test

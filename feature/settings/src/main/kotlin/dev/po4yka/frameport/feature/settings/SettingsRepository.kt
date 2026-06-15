@@ -26,4 +26,7 @@ interface SettingsRepository {
 
     /** Update the import path template string. */
     suspend fun setImportPathTemplate(template: String)
+
+    /** Toggle [ImportPreferences.preserveOriginalFilename]. */
+    suspend fun setPreserveOriginalFilename(preserve: Boolean)
 }

@@ -10,6 +10,7 @@ import dev.po4yka.frameport.feature.connection.CameraConnectRoute
 import dev.po4yka.frameport.feature.connection.CameraScanRoute
 import dev.po4yka.frameport.feature.diagnostics.DiagnosticsRoute
 import dev.po4yka.frameport.feature.gallery.GalleryRoute
+import dev.po4yka.frameport.feature.gallery.LocalTimelineRoute
 import dev.po4yka.frameport.feature.importmedia.ImportRoute
 import dev.po4yka.frameport.feature.liveview.LiveViewRoute
 import dev.po4yka.frameport.feature.onboarding.OnboardingRoute
@@ -82,6 +83,10 @@ fun FrameportNavHost(
 
                     FrameportDestination.Settings -> {
                         SettingsRoute()
+                    }
+
+                    FrameportDestination.LocalTimeline -> {
+                        LocalTimelineRoute(onBack = { backStack.removeAt(backStack.lastIndex) })
                     }
 
                     else -> {

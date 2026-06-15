@@ -11,13 +11,17 @@ import dagger.hilt.components.SingletonComponent
 import dev.po4yka.frameport.core.storage.catalog.ImportCatalog
 import dev.po4yka.frameport.core.storage.catalog.RoomImportCatalog
 import dev.po4yka.frameport.core.storage.catalog.db.FrameportDatabase
+import dev.po4yka.frameport.core.storage.catalog.db.FrameportMigrations
 import dev.po4yka.frameport.core.storage.catalog.db.ImportCatalogDao
+import dev.po4yka.frameport.core.storage.profile.db.CameraProfileDao
 import dev.po4yka.frameport.core.storage.session.ExitReasonDedupStore
 import dev.po4yka.frameport.core.storage.session.RoomExitReasonDedupStore
 import dev.po4yka.frameport.core.storage.session.RoomSessionProgressStore
 import dev.po4yka.frameport.core.storage.session.SessionProgressStore
 import dev.po4yka.frameport.core.storage.session.db.ExitReasonDao
 import dev.po4yka.frameport.core.storage.session.db.SessionProgressDao
+import dev.po4yka.frameport.core.storage.timeline.LocalTimelineStore
+import dev.po4yka.frameport.core.storage.timeline.RoomLocalTimelineStore
 import javax.inject.Singleton
 
 /**
@@ -27,6 +31,9 @@ import javax.inject.Singleton
  * Version notes:
  *   v2 — M10: added [SessionProgressDao] / [ExitReasonDao] providers and
  *             [SessionProgressStore] / [ExitReasonDedupStore] bindings.
+ *   v3 — M18: replaced destructive-migration fallback with explicit [FrameportMigrations.MIGRATION_2_3].
+ *             Added [CameraProfileDao] provider and [LocalTimelineStore] binding.
+ *             Schema is now stable enough for versioned migrations.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -43,6 +50,10 @@ abstract class StorageModule {
     @Singleton
     abstract fun bindExitReasonDedupStore(impl: RoomExitReasonDedupStore): ExitReasonDedupStore
 
+    @Binds
+    @Singleton
+    abstract fun bindLocalTimelineStore(impl: RoomLocalTimelineStore): LocalTimelineStore
+
     companion object {
         @Provides
         @Singleton
@@ -54,12 +65,7 @@ abstract class StorageModule {
                     context,
                     FrameportDatabase::class.java,
                     "frameport.db",
-                )
-                // The local catalog and session data are reconstructible caches. For pre-1.0
-                // schema changes we drop and rebuild rather than ship migrations that could crash
-                // on upgrade. Replace with explicit migrations once the schema stabilizes for
-                // release.
-                .fallbackToDestructiveMigration(dropAllTables = true)
+                ).addMigrations(FrameportMigrations.MIGRATION_2_3)
                 .build()
 
         @Provides
@@ -73,5 +79,9 @@ abstract class StorageModule {
         @Provides
         @Singleton
         fun provideExitReasonDao(database: FrameportDatabase): ExitReasonDao = database.exitReasonDao()
+
+        @Provides
+        @Singleton
+        fun provideCameraProfileDao(database: FrameportDatabase): CameraProfileDao = database.cameraProfileDao()
     }
 }

@@ -1,0 +1,20 @@
+# Frameport seed baseline profile — M18
+# Hand-authored startup critical path. Covers Application init, MainActivity, and the
+# Compose nav host warm-up. Generated baseline profiles from macrobenchmark are deferred
+# to a later milestone (macrobenchmark/com.android.test module not wired yet against
+# AGP 9.2.1 / compileSdk 37). profileinstaller bundles this file at install time so ART
+# can pre-compile these classes without a profile-guided run first.
+#
+# Format: one descriptor per line. HSP = hot+startup+post-startup.
+# profileinstaller interprets lines without a leading flag as startup classes.
+
+Ldev/po4yka/frameport/FrameportApplication;
+Ldev/po4yka/frameport/MainActivity;
+Ldev/po4yka/frameport/ui/FrameportAppKt;
+Ldev/po4yka/frameport/navigation/FrameportNavHostKt;
+Ldev/po4yka/frameport/navigation/FrameportDestination;
+Ldev/po4yka/frameport/navigation/FrameportDestination$Home;
+Ldev/po4yka/frameport/navigation/FrameportDestination$Onboarding;
+Ldev/po4yka/frameport/core/designsystem/FrameportTheme;
+Ldev/po4yka/frameport/di/AppDispatchersModule;
+Ldev/po4yka/frameport/di/CameraBindingsModule;

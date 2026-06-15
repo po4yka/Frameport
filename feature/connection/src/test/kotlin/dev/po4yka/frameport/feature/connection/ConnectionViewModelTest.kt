@@ -12,6 +12,7 @@ import dev.po4yka.frameport.camera.domain.BleAssistedConnectUseCase
 import dev.po4yka.frameport.camera.domain.OpenCameraSessionUseCase
 import dev.po4yka.frameport.core.model.FrameportError
 import dev.po4yka.frameport.core.model.TransportKind
+import dev.po4yka.frameport.core.testing.FakeCameraProfileRepository
 import dev.po4yka.frameport.core.testing.FakeCameraRepository
 import dev.po4yka.frameport.core.testing.FakeCameraWifiConnector
 import kotlinx.coroutines.Dispatchers
@@ -113,6 +114,7 @@ private class RecordingTimberTree : Timber.Tree() {
 class ConnectionViewModelTest {
     private val testDispatcher = UnconfinedTestDispatcher()
     private lateinit var fakeRepo: FakeCameraRepository
+    private lateinit var fakeProfileRepo: FakeCameraProfileRepository
     private lateinit var useCase: OpenCameraSessionUseCase
     private lateinit var viewModel: ConnectionViewModel
 
@@ -120,9 +122,10 @@ class ConnectionViewModelTest {
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
         fakeRepo = FakeCameraRepository()
+        fakeProfileRepo = FakeCameraProfileRepository()
         // UnconfinedTestDispatcher so the flowOn(ioDispatcher) in OpenCameraSessionUseCase
         // executes eagerly in the test coroutine context without needing advanceUntilIdle.
-        useCase = OpenCameraSessionUseCase(fakeRepo, testDispatcher)
+        useCase = OpenCameraSessionUseCase(fakeRepo, fakeProfileRepo, testDispatcher)
         viewModel = buildViewModel()
     }
 
@@ -377,12 +380,12 @@ class ConnectionViewModelTest {
                             camera = BleCameraRef(id = "fake-id", displayName = "Test Cam"),
                             signalStrengthDbm = -60,
                         )
-                    // SSID characteristic UUID from FujiCharacteristicIds.WIFI_SSID
-                    characteristicValues["4186f39e-cd9e-11e4-8dfc-aa07a5b093db"] =
+                    // SSID characteristic UUID — BleConstants.FujiGattCharacteristics.CHR_CAMERA_SSID_NAME_STRING
+                    characteristicValues["bf6dc9cf-3606-4ec9-a4c8-d77576e93ea4"] =
                         BLE_TEST_SSID.toByteArray(Charsets.UTF_8)
-                    // Passphrase characteristic UUID from FujiCharacteristicIds.WIFI_PASSPHRASE
+                    // Passphrase characteristic UUID — BleConstants.FujiGattCharacteristics.CHR_CAMERA_WIFI_PASSPHRASE_STRING
                     // PRIVACY: synthetic value only — never a real credential
-                    characteristicValues["4186f3c0-cd9e-11e4-8dfc-aa07a5b093db"] =
+                    characteristicValues["e809256a-915c-4967-92e8-53b7d4cad213"] =
                         BLE_TEST_PASSPHRASE.toByteArray(Charsets.UTF_8)
                 }
             val vm = buildViewModel(bleClient)
@@ -467,9 +470,11 @@ class ConnectionViewModelTest {
                             camera = BleCameraRef(id = BLE_TEST_MAC, displayName = null),
                             signalStrengthDbm = -55,
                         )
-                    characteristicValues["4186f39e-cd9e-11e4-8dfc-aa07a5b093db"] =
+                    // Production characteristic UUIDs so the passphrase actually flows
+                    // through the handoff — otherwise this privacy assertion is vacuous.
+                    characteristicValues["bf6dc9cf-3606-4ec9-a4c8-d77576e93ea4"] =
                         BLE_TEST_SSID.toByteArray(Charsets.UTF_8)
-                    characteristicValues["4186f3c0-cd9e-11e4-8dfc-aa07a5b093db"] =
+                    characteristicValues["e809256a-915c-4967-92e8-53b7d4cad213"] =
                         BLE_TEST_PASSPHRASE.toByteArray(Charsets.UTF_8)
                 }
             val vm = buildViewModel(bleClient)

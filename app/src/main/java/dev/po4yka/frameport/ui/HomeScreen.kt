@@ -13,6 +13,7 @@ fun HomeRoute(onNavigate: (FrameportDestination) -> Unit) {
     HomeScreen(
         onConnectCamera = { onNavigate(FrameportDestination.CameraScan) },
         onBrowseMedia = { onNavigate(FrameportDestination.Gallery) },
+        onTimeline = { onNavigate(FrameportDestination.LocalTimeline) },
         onImportQueue = { onNavigate(FrameportDestination.Import) },
         onRemote = { onNavigate(FrameportDestination.Remote) },
         onLiveView = { onNavigate(FrameportDestination.LiveView) },
@@ -25,6 +26,7 @@ fun HomeRoute(onNavigate: (FrameportDestination) -> Unit) {
 fun HomeScreen(
     onConnectCamera: () -> Unit,
     onBrowseMedia: () -> Unit,
+    onTimeline: () -> Unit,
     onImportQueue: () -> Unit,
     onRemote: () -> Unit,
     onLiveView: () -> Unit,
@@ -38,6 +40,7 @@ fun HomeScreen(
         )
         HomeActionCard("Connect camera", "Manual connection flow scaffold.", "Not implemented yet", onConnectCamera)
         HomeActionCard("Browse camera media", "Empty gallery backed by fake repositories.", "Planned", onBrowseMedia)
+        HomeActionCard("Import timeline", "Local-only timeline of past import sessions.", "M18", onTimeline)
         HomeActionCard("Import queue", "Local import queue placeholder.", "Planned", onImportQueue)
         HomeActionCard("Remote shutter", "Remote capture is outside the current MVP.", "Planned", onRemote)
         HomeActionCard("Live view", "Live view parsing will be Rust-owned later.", "Planned", onLiveView)
@@ -69,6 +72,7 @@ private fun HomeScreenPreview() {
         HomeScreen(
             onConnectCamera = {},
             onBrowseMedia = {},
+            onTimeline = {},
             onImportQueue = {},
             onRemote = {},
             onLiveView = {},

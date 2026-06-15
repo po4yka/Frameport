@@ -35,4 +35,8 @@ internal class DataStoreSettingsRepository
         override suspend fun setImportPathTemplate(template: String) {
             dataStore.updateData { it.copy(importPathTemplate = template) }
         }
+
+        override suspend fun setPreserveOriginalFilename(preserve: Boolean) {
+            dataStore.updateData { it.copy(preserveOriginalFilename = preserve) }
+        }
     }

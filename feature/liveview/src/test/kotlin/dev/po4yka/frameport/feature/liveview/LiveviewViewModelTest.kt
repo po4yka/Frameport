@@ -438,6 +438,13 @@ private class FakeLiveViewSource {
 
         override suspend fun cancelTransfer(transferId: TransferId) = Unit
 
+        override suspend fun openUsbSession(
+            usbFd: Int,
+            descriptors: ByteArray,
+        ): Result<SessionId> = Result.success(SessionId(0L))
+
+        override suspend fun closeUsbSession(sessionId: SessionId) = Unit
+
         override suspend fun remoteShutter(
             sessionId: SessionId,
             action: ShutterAction,
@@ -497,6 +504,13 @@ private class ThrowingLiveViewSource(
         ): Flow<TransferProgress> = emptyFlow()
 
         override suspend fun cancelTransfer(transferId: TransferId) = Unit
+
+        override suspend fun openUsbSession(
+            usbFd: Int,
+            descriptors: ByteArray,
+        ): Result<SessionId> = Result.success(SessionId(0L))
+
+        override suspend fun closeUsbSession(sessionId: SessionId) = Unit
 
         override suspend fun remoteShutter(
             sessionId: SessionId,

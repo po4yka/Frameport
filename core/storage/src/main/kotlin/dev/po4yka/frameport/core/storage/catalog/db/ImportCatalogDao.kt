@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ImportCatalogDao {
@@ -31,4 +32,16 @@ interface ImportCatalogDao {
         """,
     )
     suspend fun recentImports(limit: Int): List<ImportedMediaEntity>
+
+    /**
+     * Observe all imported media ordered by import time descending.
+     *
+     * Used by [RoomLocalTimelineStore] to group rows into [ImportSession] records for the
+     * local timeline screen. Re-emits on every write to the imported_media table.
+     *
+     * cancel-safe: Room Flow collection; cancellation unsubscribes the underlying
+     * InvalidationTracker observer cleanly.
+     */
+    @Query("SELECT * FROM imported_media ORDER BY imported_at_epoch_millis DESC")
+    fun observeAllImported(): Flow<List<ImportedMediaEntity>>
 }

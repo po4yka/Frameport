@@ -3,6 +3,8 @@ package dev.po4yka.frameport.core.testing
 import dev.po4yka.frameport.camera.api.CameraMediaFormat
 import dev.po4yka.frameport.camera.api.CameraMediaObject
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
+import dev.po4yka.frameport.camera.api.CameraProfile
+import dev.po4yka.frameport.camera.api.CameraProfileRepository
 import dev.po4yka.frameport.camera.api.CameraRepository
 import dev.po4yka.frameport.camera.api.CameraSessionState
 import dev.po4yka.frameport.camera.api.CameraWifiCredentials
@@ -241,6 +243,69 @@ class FakeCameraRepository : CameraRepository {
         closedSessions.add(sessionId)
         _sessionState.value = CameraSessionState.Closed
     }
+}
+
+// ─── FakeCameraProfileRepository ─────────────────────────────────────────────
+
+/**
+ * No-op test double for [CameraProfileRepository].
+ *
+ * All mutating operations are recorded but produce no side effects.
+ * [profiles] always emits an empty list unless [setProfiles] is called.
+ *
+ * Use [upsertCalls] to assert that [upsertOnSessionOpen] was (or was not) called.
+ */
+class FakeCameraProfileRepository : CameraProfileRepository {
+    private val _profiles = MutableStateFlow<List<CameraProfile>>(emptyList())
+    override val profiles: StateFlow<List<CameraProfile>> = _profiles.asStateFlow()
+
+    data class UpsertCall(
+        val sessionId: SessionId,
+        val cameraModel: String,
+        val firmwareVersion: String,
+        val rawSerialOrStableId: String,
+        val transportCapabilities: Long,
+        val compatibilityFlags: Long,
+    )
+
+    val upsertCalls = mutableListOf<UpsertCall>()
+    val deletedProfileIds = mutableListOf<String>()
+
+    fun setProfiles(profiles: List<CameraProfile>) {
+        _profiles.value = profiles
+    }
+
+    // cancel-safe: no real suspension; records call immediately.
+    override suspend fun upsertOnSessionOpen(
+        sessionId: SessionId,
+        cameraModel: String,
+        firmwareVersion: String,
+        rawSerialOrStableId: String,
+        transportCapabilities: Long,
+        compatibilityFlags: Long,
+    ) {
+        upsertCalls +=
+            UpsertCall(
+                sessionId = sessionId,
+                cameraModel = cameraModel,
+                firmwareVersion = firmwareVersion,
+                rawSerialOrStableId = rawSerialOrStableId,
+                transportCapabilities = transportCapabilities,
+                compatibilityFlags = compatibilityFlags,
+            )
+    }
+
+    // cancel-safe: no real suspension; linear scan over in-memory list.
+    override suspend fun getProfileBySerialHash(serialHash: String): CameraProfile? =
+        _profiles.value.firstOrNull { it.serialHash == serialHash }
+
+    // cancel-safe: no real suspension; removes from in-memory list.
+    override suspend fun deleteProfile(profileId: String) {
+        deletedProfileIds += profileId
+        _profiles.value = _profiles.value.filter { it.profileId != profileId }
+    }
+
+    override fun getProfileForCurrentCamera(): CameraProfile? = _profiles.value.firstOrNull()
 }
 
 // ─── FakeMediaRepository ──────────────────────────────────────────────────────

@@ -405,4 +405,26 @@ private class FakeNativeFujiSdk : NativeFujiSdk {
             IllegalStateException("native_cancel_transfer failed with code ${NativeFujiJni.ERR_INVALID_SESSION}"),
         )
     }
+
+    override fun nativeLiveViewStart(
+        sessionId: Long,
+        liveViewFd: Int,
+        callback: LiveViewFrameCallback,
+    ): Result<Unit> = Result.success(Unit)
+
+    override fun nativeLiveViewStop(sessionId: Long): Result<Unit> = Result.success(Unit)
+
+    override fun openUsbSession(
+        fd: Int,
+        descriptors: ByteArray,
+    ): Result<Long> {
+        val id = nextSessionId++
+        activeSessions.add(id)
+        return Result.success(id)
+    }
+
+    override fun closeUsbSession(sessionId: Long): Result<Unit> {
+        activeSessions.remove(sessionId)
+        return Result.success(Unit)
+    }
 }

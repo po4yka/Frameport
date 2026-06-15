@@ -261,4 +261,8 @@ private class FakeSettingsRepository : SettingsRepository {
     override suspend fun setImportPathTemplate(template: String) {
         _preferences.value = _preferences.value.copy(importPathTemplate = template)
     }
+
+    override suspend fun setPreserveOriginalFilename(preserve: Boolean) {
+        _preferences.value = _preferences.value.copy(preserveOriginalFilename = preserve)
+    }
 }

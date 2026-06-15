@@ -55,4 +55,9 @@ sealed interface FrameportDestination : NavKey {
     data object Settings : FrameportDestination {
         override val title: String = "Settings"
     }
+
+    @Serializable
+    data object LocalTimeline : FrameportDestination {
+        override val title: String = "Timeline"
+    }
 }
