@@ -31,9 +31,10 @@ import javax.inject.Singleton
  * Version notes:
  *   v2 — M10: added [SessionProgressDao] / [ExitReasonDao] providers and
  *             [SessionProgressStore] / [ExitReasonDedupStore] bindings.
- *   v3 — M18: replaced destructive-migration fallback with explicit [FrameportMigrations.MIGRATION_2_3].
+ *   v3 — M18: added [FrameportMigrations.MIGRATION_1_2] to cover devices upgrading from v1.
+ *             Replaced destructive-migration fallback with explicit [FrameportMigrations.MIGRATION_2_3].
  *             Added [CameraProfileDao] provider and [LocalTimelineStore] binding.
- *             Schema is now stable enough for versioned migrations.
+ *             Full v1→v2→v3 migration chain is now in place; no destructive fallback needed.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -65,8 +66,10 @@ abstract class StorageModule {
                     context,
                     FrameportDatabase::class.java,
                     "frameport.db",
-                ).addMigrations(FrameportMigrations.MIGRATION_2_3)
-                .build()
+                ).addMigrations(
+                    FrameportMigrations.MIGRATION_1_2,
+                    FrameportMigrations.MIGRATION_2_3,
+                ).build()
 
         @Provides
         @Singleton

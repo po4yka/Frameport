@@ -17,6 +17,48 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  */
 object FrameportMigrations {
     /**
+     * Migration from version 1 to version 2.
+     *
+     * Changes:
+     * 1. Creates the session_progress table (mirrors [SessionProgressEntity]):
+     *    - session_id         INTEGER NOT NULL PRIMARY KEY
+     *    - object_handle      INTEGER NOT NULL
+     *    - bytes_transferred  INTEGER NOT NULL
+     *    - total_bytes        INTEGER NOT NULL
+     *    - state              TEXT NOT NULL
+     *    - updated_at_millis  INTEGER NOT NULL
+     * 2. Creates the recorded_exit_reason table (mirrors [RecordedExitReasonEntity]):
+     *    - id                 TEXT NOT NULL PRIMARY KEY
+     *    - recorded_at_millis INTEGER NOT NULL
+     */
+    val MIGRATION_1_2 =
+        object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_progress (
+                        session_id INTEGER NOT NULL PRIMARY KEY,
+                        object_handle INTEGER NOT NULL,
+                        bytes_transferred INTEGER NOT NULL,
+                        total_bytes INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        updated_at_millis INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS recorded_exit_reason (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        recorded_at_millis INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+    /**
      * Migration from version 2 to version 3.
      *
      * Changes:
