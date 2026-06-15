@@ -97,6 +97,15 @@ internal class AndroidGattTransport
 
         @Volatile private var pendingConnectSlot: ConnectSlot? = null
 
+        /**
+         * Precomputed characteristic-UUID to service-UUID lookup map, built once in
+         * [discoverServices] after [onServicesDiscovered] fires. Replaces the O(n*m) linear
+         * scan in [findServiceForCharacteristic] with an O(1) map lookup on every GATT operation.
+         * Cleared in [disconnect] so a reconnect always rebuilds from fresh service data.
+         * Written only from the actor coroutine; [Volatile] makes the write visible to any reader.
+         */
+        @Volatile private var characteristicServiceMap: Map<UUID, UUID> = emptyMap()
+
         @Volatile private var pendingServices: CompletableDeferred<Unit>? = null
 
         @Volatile private var pendingMtu: CompletableDeferred<Int>? = null
@@ -164,6 +173,17 @@ internal class AndroidGattTransport
             }
             try {
                 deferred.await()
+                // Build the characteristic -> service lookup map once, immediately after service
+                // discovery completes. All subsequent GATT operations use O(1) map lookup instead
+                // of the O(n*m) linear scan over activeGatt.services on every call.
+                val map = mutableMapOf<UUID, UUID>()
+                for (service in activeGatt.services) {
+                    for (chr in service.characteristics) {
+                        map[chr.uuid] = service.uuid
+                    }
+                }
+                characteristicServiceMap = map
+                Timber.d("BLE: characteristic-service map built entries=${map.size}")
             } finally {
                 pendingServices = null
             }
@@ -314,6 +334,8 @@ internal class AndroidGattTransport
                 gatt?.close()
                 gatt = null
             }
+            // Clear the lookup map so a subsequent reconnect always rebuilds from fresh data.
+            characteristicServiceMap = emptyMap()
             _connectionState.value = BleConnectionState.Disconnected
             Timber.d("BLE: GattTransport disconnected and closed")
         }
@@ -495,19 +517,19 @@ internal class AndroidGattTransport
         // -------------------------------------------------------------------------
 
         /**
-         * Find the service UUID for a given characteristic UUID by scanning discovered services.
-         * Returns the first service that contains the characteristic.
+         * Return the service UUID for a given characteristic UUID using the precomputed lookup
+         * map built in [discoverServices]. O(1) per call — replaces the former O(n*m) linear
+         * scan over [BluetoothGatt.services] that ran on every GATT read/write/notify operation.
          *
-         * In the future this could be pre-built as a lookup map after discoverServices.
+         * Throws [IllegalStateException] if the map is empty (discoverServices not yet called) or
+         * if the characteristic UUID is absent (not advertised by the connected camera).
          */
         private fun findServiceForCharacteristic(characteristicUuid: String): UUID {
             val chrUuid = UUID.fromString(characteristicUuid)
-            val activeGatt = gatt ?: throw IllegalStateException("GATT not connected")
-            for (service in activeGatt.services) {
-                if (service.getCharacteristic(chrUuid) != null) {
-                    return service.uuid
-                }
-            }
-            throw IllegalStateException("No service found for characteristic $characteristicUuid")
+            return characteristicServiceMap[chrUuid]
+                ?: throw IllegalStateException(
+                    "No service found for characteristic $characteristicUuid — " +
+                        "discoverServices() may not have completed successfully",
+                )
         }
     }
