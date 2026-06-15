@@ -276,7 +276,7 @@ class CameraWifiConnectorImpl
                 activeSocket = socket
 
                 _state.value = CameraWifiState.Connected
-                Timber.tag(TAG).d("openBoundSocket: Connected, fd=%d", ownedFd)
+                Timber.tag(TAG).d("openBoundSocket: Connected")
 
                 Result.success(OwnedSocketHandle(ownedFd))
             }
@@ -364,7 +364,7 @@ class CameraWifiConnectorImpl
                 }
 
                 _state.value = CameraWifiState.EventSocketHandedOff
-                Timber.tag(TAG).d("openEventSocket: EventSocketHandedOff, fd=%d", ownedFd)
+                Timber.tag(TAG).d("openEventSocket: EventSocketHandedOff")
 
                 Result.success(OwnedSocketHandle(ownedFd))
             }
@@ -452,7 +452,7 @@ class CameraWifiConnectorImpl
                 }
 
                 _state.value = CameraWifiState.LiveViewSocketHandedOff
-                Timber.tag(TAG).d("openLiveViewSocket: LiveViewSocketHandedOff, fd=%d", ownedFd)
+                Timber.tag(TAG).d("openLiveViewSocket: LiveViewSocketHandedOff")
 
                 Result.success(OwnedSocketHandle(ownedFd))
             }
