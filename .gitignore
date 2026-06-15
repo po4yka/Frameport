@@ -9,6 +9,7 @@ app/build/
 /.DS_Store
 *.keystore
 *.jks
+keystore.properties
 *.apk
 *.aab
 rust/fuji-rs/target/

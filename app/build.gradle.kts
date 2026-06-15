@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -29,12 +31,52 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Release signing: reads credentials from keystore.properties (gitignored) or environment
+    // variables. Falls back to the debug keystore for local development with a build warning.
+    // keystore.properties format (place at repo root, never commit):
+    //   storeFile=/absolute/path/to/release.jks
+    //   storePassword=...
+    //   keyAlias=...
+    //   keyPassword=...
+    // Environment variable equivalents (for CI):
+    //   FRAMEPORT_STORE_FILE, FRAMEPORT_STORE_PASSWORD,
+    //   FRAMEPORT_KEY_ALIAS, FRAMEPORT_KEY_PASSWORD
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
+    val keystoreProps =
+        Properties().also { props ->
+            if (keystorePropertiesFile.exists()) props.load(keystorePropertiesFile.inputStream())
+        }
+
+    fun keystoreValue(
+        propKey: String,
+        envKey: String,
+    ): String? =
+        (keystoreProps[propKey] as? String)?.takeIf { it.isNotBlank() }
+            ?: System.getenv(envKey)?.takeIf { it.isNotBlank() }
+
+    val releaseStoreFile = keystoreValue("storeFile", "FRAMEPORT_STORE_FILE")
+    val releaseStorePassword = keystoreValue("storePassword", "FRAMEPORT_STORE_PASSWORD")
+    val releaseKeyAlias = keystoreValue("keyAlias", "FRAMEPORT_KEY_ALIAS")
+    val releaseKeyPassword = keystoreValue("keyPassword", "FRAMEPORT_KEY_PASSWORD")
+    val hasReleaseKeystore =
+        listOf(
+            releaseStoreFile,
+            releaseStorePassword,
+            releaseKeyAlias,
+            releaseKeyPassword,
+        ).all { !it.isNullOrBlank() }
+
     signingConfigs {
-        // TODO(release): replace debug signing with a real keystore before production release.
-        // Using the debug keystore allows assembleRelease to produce a signed APK for local
-        // verification without requiring a production keystore in CI.
         getByName("debug") {
             // Uses the default debug keystore (~/.android/debug.keystore); no overrides needed.
+        }
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
         }
     }
 
@@ -47,8 +89,17 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // TODO(release): replace debug signing with a real keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig =
+                if (hasReleaseKeystore) {
+                    signingConfigs.getByName("release")
+                } else {
+                    logger.warn(
+                        "WARNING: release build is signed with the debug keystore. " +
+                            "Provide keystore.properties or FRAMEPORT_STORE_FILE env vars " +
+                            "before submitting to the Play Store.",
+                    )
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 
