@@ -139,6 +139,10 @@ class AndroidCameraUsbConnector
         }
 
         private fun handleAttached(intent: Intent) {
+            // Guard: if the receiver was unregistered (connector closed), ignore stale broadcasts
+            // that the OS may deliver in-flight after unregisterReceiver returns.
+            if (!receiverRegistered.get()) return
+
             val device: UsbDevice =
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java) ?: return
@@ -160,6 +164,9 @@ class AndroidCameraUsbConnector
         }
 
         private fun handleDetached(intent: Intent) {
+            // Guard: ignore stale detach broadcasts after the connector has been closed.
+            if (!receiverRegistered.get()) return
+
             val device: UsbDevice =
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java) ?: return
@@ -434,6 +441,19 @@ class AndroidCameraUsbConnector
             withContext(ioDispatcher) {
                 _state.value = UsbSessionState.Closing
                 Timber.tag(TAG).d("close: Closing sessionId=%d", handle.sessionId.value)
+
+                // Unregister the BroadcastReceiver exactly once. The compareAndSet prevents a
+                // double-unregister if close() were somehow raced (closedOnce already guards
+                // this, but the explicit CAS here keeps the receiver lifecycle self-contained).
+                if (receiverRegistered.compareAndSet(true, false)) {
+                    try {
+                        context.unregisterReceiver(usbEventReceiver)
+                        Timber.tag(TAG).d("close: BroadcastReceiver unregistered")
+                    } catch (e: IllegalArgumentException) {
+                        // Receiver was never registered or already unregistered — safe to ignore.
+                        Timber.tag(TAG).d("close: unregisterReceiver no-op: %s", e.message)
+                    }
+                }
 
                 // Tell Rust to release the USB session and its OwnedFd (closes the dup).
                 try {
