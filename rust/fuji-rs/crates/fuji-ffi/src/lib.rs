@@ -99,6 +99,15 @@ pub fn native_shutdown() -> i32 {
     let liveview_ok = match LIVEVIEW_SESSIONS.lock() {
         Ok(mut lv) => {
             for handle in lv.values() {
+                // Relaxed is correct here: the stop_flag carries no data payload;
+                // it is a pure termination signal. The preceding Mutex::lock()
+                // provides a full memory fence that makes all prior writes visible
+                // to any thread that subsequently acquires the same mutex. The
+                // following jh.join() provides an implicit acquire barrier that
+                // ensures any stores made before join() are visible afterward.
+                // The reader (run_liveview_loop) uses Relaxed load and only needs
+                // eventual visibility — a few extra iterations before observing
+                // the flag on a weakly-ordered CPU are acceptable.
                 handle.stop_flag.store(true, Ordering::Relaxed);
             }
             // Collect keys first to avoid holding the guard while joining.
@@ -977,6 +986,13 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
         };
 
         // Signal the worker to exit.
+        // Relaxed is correct: the stop_flag is a pure termination signal with
+        // no data payload. The preceding Mutex::lock() (LIVEVIEW_SESSIONS) acts
+        // as a full fence; the following jh.join() provides acquire semantics
+        // that make the store visible to the now-exited worker thread. The
+        // reader (run_liveview_loop) uses Relaxed load and only requires
+        // eventual visibility — extra loop iterations on weakly-ordered CPUs
+        // before observing the flag are acceptable for a stop signal.
         handle.stop_flag.store(true, Ordering::Relaxed);
 
         // Join the worker thread; this waits for the read loop to drain and exit.
