@@ -1325,4 +1325,43 @@ mod tests {
         assert!(!TRANSFERS.lock().unwrap().contains(&7));
         native_shutdown();
     }
+
+    // ----- catch_unwind panic-interception contract -----
+
+    /// Verify that the catch_unwind pattern used in every JNI entry point
+    /// maps a panicking inner function to the ERR_PANIC sentinel.
+    ///
+    /// This test exercises the exact pattern used at each JNI boundary:
+    ///   catch_unwind(inner_fn).unwrap_or(ERR_PANIC)
+    /// and confirms that a panicking inner fn produces ERR_PANIC rather than
+    /// unwinding past the catch site (which under panic=abort would abort the
+    /// process, and under panic=unwind would silently lose the error code).
+    #[test]
+    fn catch_unwind_maps_panic_to_err_panic_sentinel() {
+        fn always_panics() -> i32 {
+            panic!("deliberate test panic");
+        }
+
+        let result: i32 = catch_unwind(always_panics).unwrap_or(ERR_PANIC);
+        assert_eq!(
+            result, ERR_PANIC,
+            "a panicking inner fn must produce ERR_PANIC ({ERR_PANIC}), got {result}"
+        );
+    }
+
+    /// Verify that a non-panicking inner fn still returns its real value
+    /// through the same catch_unwind wrapper (i.e., the wrapper is transparent
+    /// on the happy path and does not corrupt the return value).
+    #[test]
+    fn catch_unwind_is_transparent_on_success() {
+        fn returns_ok() -> i32 {
+            OK
+        }
+
+        let result: i32 = catch_unwind(returns_ok).unwrap_or(ERR_PANIC);
+        assert_eq!(
+            result, OK,
+            "a successful inner fn must return OK ({OK}) through catch_unwind, got {result}"
+        );
+    }
 }
