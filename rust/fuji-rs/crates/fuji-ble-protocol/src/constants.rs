@@ -20,13 +20,6 @@
 /// master-constants.md §5a. [H] XPN, XBL
 pub const MANUFACTURER_COMPANY_ID: u16 = 0x04D8;
 
-/// Byte offset of the manufacturer-specific data field within the raw
-/// advertisement payload.
-///
-/// Source: ble-wifi-discovery.md §"Advertisement and Discovery";
-/// master-constants.md §5a `MANUFACTURER_OFFSET`. [H] XPN, XBL
-pub const MANUFACTURER_OFFSET: usize = 23;
-
 /// Size in bytes of the manufacturer company-id field.
 ///
 /// Source: master-constants.md §5a `MANUFACTURER_SIZE`. [H] XPN, XBL
