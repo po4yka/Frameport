@@ -5,10 +5,9 @@ import dev.po4yka.frameport.core.storage.catalog.db.ImportCatalogDao
 import dev.po4yka.frameport.core.storage.catalog.db.ImportedMediaEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -101,15 +100,20 @@ class RoomLocalTimelineStore
         private companion object {
             const val MAX_THUMBNAILS = 4
 
-            private val utcDayFormatter =
-                object : ThreadLocal<SimpleDateFormat>() {
-                    override fun initialValue(): SimpleDateFormat =
-                        SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
-                            timeZone = TimeZone.getTimeZone("UTC")
-                        }
-                }
+            /**
+             * Thread-safe, immutable formatter for UTC calendar-day keys ("yyyy-MM-dd").
+             *
+             * [DateTimeFormatter] is immutable and safe to share across coroutines without
+             * ThreadLocal wrapping. Replaces the previous ThreadLocal<SimpleDateFormat>, which
+             * was semantically incorrect in a coroutine context where a coroutine may migrate
+             * between threads and inadvertently pick up a formatter initialised on a different
+             * thread (though in practice SimpleDateFormat is also not thread-safe, making the
+             * ThreadLocal necessary but still fragile under coroutine dispatch).
+             */
+            private val UTC_DAY_FORMATTER: DateTimeFormatter =
+                DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC)
 
             /** Format an epoch-millis timestamp as a UTC calendar-day string "yyyy-MM-dd". */
-            fun utcDayKey(epochMillis: Long): String = utcDayFormatter.get()!!.format(Date(epochMillis))
+            fun utcDayKey(epochMillis: Long): String = UTC_DAY_FORMATTER.format(Instant.ofEpochMilli(epochMillis))
         }
     }
