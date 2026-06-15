@@ -181,8 +181,11 @@ class CameraWifiConnectorImpl
                         }
                     }
 
-                activeCallback = networkCallback
+                // Unregister any stale callback from a previous requestCameraNetwork call
+                // before registering a new one; avoids a callback leak on repeated calls.
+                safeUnregisterCallback()
                 released.set(false)
+                activeCallback = networkCallback
                 connectivityManager.requestNetwork(request, networkCallback)
 
                 deferred.await()
