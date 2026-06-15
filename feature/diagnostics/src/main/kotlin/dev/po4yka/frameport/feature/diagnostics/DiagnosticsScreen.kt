@@ -23,12 +23,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import dev.po4yka.frameport.camera.api.DiagnosticCategory
 import dev.po4yka.frameport.camera.api.DiagnosticEvent
 import dev.po4yka.frameport.camera.api.ErrorLayer
@@ -55,19 +58,26 @@ fun DiagnosticsRoute(viewModel: DiagnosticsViewModel = hiltViewModel()) {
 
     // Collect one-shot export results and show a snackbar with the file NAME only.
     // Never display the full path — privacy invariant.
-    LaunchedEffect(Unit) {
-        viewModel.exportResult.collect { result ->
-            when (result) {
-                is ExportResult.Success -> {
-                    snackbarHostState.showSnackbar(
-                        message = "Exported: ${result.fileName}",
-                    )
-                }
+    // repeatOnLifecycle(STARTED) ensures collection restarts whenever the screen
+    // returns to the STARTED state (e.g. back-stack re-entry, foreground resume)
+    // and cancels cleanly when the lifecycle drops below STARTED. A plain
+    // LaunchedEffect(Unit) would miss events emitted while the screen was paused.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            viewModel.exportResult.collect { result ->
+                when (result) {
+                    is ExportResult.Success -> {
+                        snackbarHostState.showSnackbar(
+                            message = "Exported: ${result.fileName}",
+                        )
+                    }
 
-                is ExportResult.Failure -> {
-                    snackbarHostState.showSnackbar(
-                        message = "Export failed: ${result.error.message}",
-                    )
+                    is ExportResult.Failure -> {
+                        snackbarHostState.showSnackbar(
+                            message = "Export failed: ${result.error.message}",
+                        )
+                    }
                 }
             }
         }
