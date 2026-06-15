@@ -719,6 +719,19 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
         let worker = std::thread::Builder::new()
             .name("frameport-liveview-worker".to_owned())
             .spawn(move || {
+                // Wrap the entire worker body in catch_unwind so that a panic
+                // anywhere inside (JVM attach, tokio build, read loop, on_frame
+                // callback) is contained at the thread boundary. Without this
+                // guard, a panic would either unwind silently past the thread
+                // boundary (leaking raw_fd and the GlobalRef) or abort the
+                // process if a downstream crate sets panic=abort.
+                //
+                // On the panic path: raw_fd is closed explicitly before
+                // returning so the fd does not leak for the process lifetime.
+                // The GlobalRef (callback_global) is captured by the closure;
+                // when the closure unwinds it is dropped by catch_unwind's
+                // internal unwind, releasing the JVM reference.
+                let result = catch_unwind(AssertUnwindSafe(move || {
                 // ── Obtain the cached JavaVM ───────────────────────────────────
                 let vm = match JAVA_VM.lock() {
                     Ok(guard) => match guard.as_ref() {
@@ -834,6 +847,18 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                             .await;
                     // GlobalRef (callback_global) is dropped here -> JVM reference released.
                 });
+                })); // end catch_unwind
+
+                // On panic: raw_fd may still be open if the panic occurred before
+                // TcpStream::from_raw_fd took ownership. We attempt a best-effort
+                // close; closing an already-closed fd returns EBADF which we ignore.
+                if result.is_err() {
+                    // SAFETY: raw_fd is RawFd (Copy). If from_raw_fd ran before the
+                    // panic, the TcpStream's Drop already closed it and this close
+                    // returns EBADF (ignored). If from_raw_fd had not yet run, this
+                    // is the only close, preventing the fd from leaking.
+                    unsafe { libc_close(raw_fd) };
+                }
             });
 
         let join_handle = match worker {
