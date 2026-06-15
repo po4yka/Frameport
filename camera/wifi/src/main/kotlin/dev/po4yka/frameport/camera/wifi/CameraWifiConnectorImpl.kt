@@ -90,6 +90,10 @@ class CameraWifiConnectorImpl
         // Original socket kept alive to maintain the network binding until release().
         @Volatile private var activeSocket: Socket? = null
 
+        // Network delivered by onAvailable; set once per requestCameraNetwork and cleared on release.
+        // Used by findNetwork to avoid OEM-flaky allNetworks re-scanning.
+        @Volatile private var activeNetwork: Network? = null
+
         // Ensures release() is idempotent — second call is a no-op.
         private val released = AtomicBoolean(false)
 
@@ -153,6 +157,9 @@ class CameraWifiConnectorImpl
                 val networkCallback =
                     object : ConnectivityManager.NetworkCallback() {
                         override fun onAvailable(network: Network) {
+                            // Cache the exact Network object so findNetwork can return it directly
+                            // without an OEM-flaky allNetworks re-scan.
+                            activeNetwork = network
                             _state.value = CameraWifiState.NetworkAvailable
                             Timber.tag(TAG).d("requestCameraNetwork: NetworkAvailable")
                             // Use network id string as correlation key — never the SSID/MAC.
@@ -487,14 +494,23 @@ class CameraWifiConnectorImpl
                 Timber.tag(TAG).d("safeUnregisterCallback: %s", e.javaClass.simpleName)
             } finally {
                 activeCallback = null
+                activeNetwork = null
             }
         }
 
         /**
-         * Finds the [Network] for the given handle by matching the network handle numeric id.
+         * Returns the [Network] for the given handle.
+         *
+         * Uses [activeNetwork] cached from [ConnectivityManager.NetworkCallback.onAvailable] so the
+         * result is deterministic and avoids an OEM-flaky [ConnectivityManager.allNetworks] scan.
+         * Falls back to the scan only when the cache is absent (e.g. after process restore).
+         *
          * Returns null if no active network matches (e.g. network was lost between request and socket open).
          */
         private fun findNetwork(handle: CameraNetworkHandle): Network? {
+            val cached = activeNetwork
+            if (cached != null) return cached
+            // Fallback: scan allNetworks if cache was cleared unexpectedly (e.g. process restore).
             val targetId = handle.value.toLongOrNull() ?: return null
             return connectivityManager.allNetworks.firstOrNull { it.networkHandle == targetId }
         }
