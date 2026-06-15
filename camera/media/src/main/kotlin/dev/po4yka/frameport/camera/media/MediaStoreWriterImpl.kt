@@ -11,9 +11,11 @@ import dev.po4yka.frameport.core.model.FrameportError
 import dev.po4yka.frameport.core.storage.catalog.ImportCatalog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -39,12 +41,13 @@ import javax.inject.Singleton
  *   ownership to a Rust side that only borrows, producing a guaranteed fd leak per import.
  *
  * Cancellation contract:
- *   While the transfer is in flight, a [CancellationException] closes the pfd, deletes the
- *   still-pending row (best-effort), and rethrows — cancellation propagates as a coroutine
- *   cancellation, NOT as an emitted [ImportState]. Emitting after cancellation would violate
- *   Flow exception transparency and run in an already-cancelled scope. [ImportState.Cancelled]
- *   is reserved for the explicit cancel-signal path (TransferRepository.cancelImport ->
- *   FujiNativeSdk.cancelTransfer), which is wired in a later milestone.
+ *   While the transfer is in flight, a [kotlinx.coroutines.CancellationException] thrown at
+ *   any suspension point (emit, collect) is caught by the try/finally in Phase A. The finally
+ *   block runs under [NonCancellable] so that cleanup (pfd close + deletePending) is guaranteed
+ *   even when the calling scope is already cancelled. Cancellation propagates after cleanup —
+ *   it is NOT emitted as [ImportState]. [ImportState.Cancelled] is reserved for the explicit
+ *   cancel-signal path (TransferRepository.cancelImport -> FujiNativeSdk.cancelTransfer),
+ *   which is wired in a later milestone.
  *
  * Privacy invariants:
  *   - Display name: "FRP_<handle>.<ext>" — no raw camera filename.
@@ -64,7 +67,8 @@ class MediaStoreWriterImpl
         private val gateway: MediaStoreGateway,
     ) : MediaStoreWriter {
         // NOT cancel-safe: writes to outputFd; partial writes are not rolled back. The pending row
-        // is deleted on cancellation/failure, but bytes already written to the fd are not recoverable.
+        // is deleted on cancellation/failure via try/finally + NonCancellable, but bytes already
+        // written to the fd are not recoverable.
         override fun importToMediaStore(
             sessionId: SessionId,
             handle: CameraObjectHandle,
@@ -91,15 +95,25 @@ class MediaStoreWriterImpl
                 // Ownership: pfd is ANDROID-OWNED and is closed by Android in every path below.
                 val pfd =
                     gateway.openWriteFd(uri) ?: run {
-                        gateway.deletePending(uri)
+                        // deletePending before emit: the emit() suspension point must not be reached
+                        // while the pending row is still live.
+                        withContext(NonCancellable) { gateway.deletePending(uri) }
                         emit(ImportState.Failed(FrameportError.Unknown("MediaStore fd open failed")))
                         return@flow
                     }
 
-                // Phase A — streaming transfer. Cancellable; on cancel OR failure the row is still
-                // PENDING, so it must be deleted and the pfd closed. This try MUST NOT include the
-                // post-success finalize: a CancellationException raised after finalize would wrongly
-                // delete an already-imported file.
+                // transferSucceeded tracks whether Phase A completed without error so the finally
+                // block knows whether to delete the still-pending row. It is set to true only after
+                // collect() returns normally; any exception or cancellation leaves it false.
+                var transferSucceeded = false
+                // transferError holds a non-cancellation Throwable so we can emit Failed after the
+                // finally block runs (emitting inside finally is not safe in a cancelled scope).
+                var transferError: Throwable? = null
+
+                // Phase A — streaming transfer. The finally block runs under NonCancellable so
+                // cleanup (pfd close + pending-row deletion) is guaranteed even when the calling
+                // scope is already cancelled. This try MUST NOT include the post-success finalize
+                // in Phase B: a cancellation after finalize would wrongly delete the committed row.
                 try {
                     // Step 6 (ADR-0004): Pass pfd.fd to Rust as a BORROWED fd.
                     //
@@ -111,31 +125,43 @@ class MediaStoreWriterImpl
                     fujiNativeSdk
                         .downloadObjectToFd(sessionId, handle, pfd.fd)
                         .collect { progress ->
-                            // Step 7 (ADR-0004): emit Running per progress event. emit() also acts
-                            // as the cooperative cancellation point (it throws if the scope is cancelled).
+                            // Step 7 (ADR-0004): emit Running per progress event. emit() is also
+                            // the cooperative cancellation point: it throws CancellationException
+                            // if the scope is cancelled, which the finally block handles.
                             emit(ImportState.Running(progress))
                         }
+                    transferSucceeded = true
                 } catch (cancel: CancellationException) {
-                    // Cancellation while still pending: clean up, do NOT emit, rethrow.
-                    closeSilently(pfd)
-                    gateway.deletePending(uri)
+                    // Re-throw immediately; the finally block below performs cleanup under
+                    // NonCancellable so the coroutine machinery propagates the cancellation.
                     throw cancel
                 } catch (t: Throwable) {
-                    // Transfer failure while still pending: clean up and emit a redacted Failed.
-                    closeSilently(pfd)
-                    gateway.deletePending(uri)
+                    // Ordinary transfer failure: record it so we can emit Failed after finally.
+                    transferError = t
+                } finally {
+                    // Runs under NonCancellable so cleanup is guaranteed even in a cancelled scope.
+                    // On success (transferSucceeded == true) pfd is closed and the pending row is
+                    // left intact for Phase B. On failure/cancellation the pending row is deleted.
+                    withContext(NonCancellable) {
+                        closeSilently(pfd)
+                        if (!transferSucceeded) {
+                            gateway.deletePending(uri)
+                        }
+                    }
+                }
+
+                // Emit failure for ordinary (non-cancellation) transfer errors after cleanup.
+                if (transferError != null) {
                     emit(ImportState.Failed(FrameportError.Unknown("Transfer failed")))
                     return@flow
                 }
 
-                // Phase B — success finalization (outside Phase A's catch). MediaStore requires the
-                // write fd to be closed before IS_PENDING can transition to 0.
-                // Ownership: close the Android-owned pfd here (Rust already closed its own dup).
-                closeSilently(pfd)
+                // Phase B — success finalization. pfd is already closed by the finally block above.
+                // MediaStore requires the write fd to be closed before IS_PENDING transitions to 0.
 
                 // Step 8a (ADR-0004): finalize the pending item.
                 if (!gateway.finalizePending(uri)) {
-                    gateway.deletePending(uri)
+                    withContext(NonCancellable) { gateway.deletePending(uri) }
                     emit(ImportState.Failed(FrameportError.Unknown("MediaStore finalize failed")))
                     return@flow
                 }
