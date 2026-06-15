@@ -206,7 +206,7 @@ impl PtpIpTcpClient {
         self.write_packet(&req)?;
 
         let resp = self.read_packet()?;
-        self.expect_ok_response(resp, "OpenSession")
+        self.expect_ok_response(resp, 0)
     }
 
     // ── Property reads ────────────────────────────────────────────────────────
@@ -292,7 +292,7 @@ impl PtpIpTcpClient {
 
         // Read trailing OperationResponse.
         let resp = self.read_packet()?;
-        self.expect_ok_response(resp, "GetThumb")?;
+        self.expect_ok_response(resp, txn)?;
 
         Ok((declared, payload))
     }
@@ -430,8 +430,7 @@ impl PtpIpTcpClient {
             self.object_stream = None;
 
             let resp = self.read_packet()?;
-            self.expect_ok_response(resp, "GetObject")?;
-            let _ = txn_id;
+            self.expect_ok_response(resp, txn_id)?;
             return Ok(0);
         }
 
@@ -509,18 +508,27 @@ impl PtpIpTcpClient {
 
         // OperationResponse(OK).
         let resp = self.read_packet()?;
-        self.expect_ok_response(resp, "data-phase")?;
-        let _ = expected_txn;
+        self.expect_ok_response(resp, expected_txn)?;
 
         Ok(payload)
     }
 
-    /// Validates that `pkt` is an `OperationResponse` with `response_code == OK`.
-    fn expect_ok_response(&self, pkt: PtpIpPacket, op: &str) -> FujiResult<()> {
+    /// Validates that `pkt` is an `OperationResponse` with `response_code == OK`
+    /// and that its echoed `transaction_id` matches `expected_txn`.
+    ///
+    /// Returns [`ProtocolError::InvalidTransactionId`] when the camera echoes a
+    /// transaction ID that does not match the one sent in the request — an
+    /// out-of-order or mismatched response would otherwise corrupt the session.
+    fn expect_ok_response(&self, pkt: PtpIpPacket, expected_txn: u32) -> FujiResult<()> {
         match pkt {
-            PtpIpPacket::OperationResponse { response_code, .. }
-                if response_code == response_code::OK =>
-            {
+            PtpIpPacket::OperationResponse {
+                response_code,
+                transaction_id,
+                ..
+            } if response_code == response_code::OK => {
+                if transaction_id != expected_txn {
+                    return Err(FujiError::Protocol(ProtocolError::InvalidTransactionId));
+                }
                 Ok(())
             }
             PtpIpPacket::OperationResponse { response_code, .. }
@@ -536,10 +544,7 @@ impl PtpIpTcpClient {
             PtpIpPacket::OperationResponse { .. } => {
                 Err(FujiError::Protocol(ProtocolError::OperationRejected))
             }
-            _ => {
-                let _ = op;
-                Err(FujiError::Protocol(ProtocolError::UnexpectedPacket))
-            }
+            _ => Err(FujiError::Protocol(ProtocolError::UnexpectedPacket)),
         }
     }
 }
@@ -627,5 +632,107 @@ mod tests {
             open_from_owned_socket_fd(3),
             Err(FujiError::NotImplemented(_))
         ));
+    }
+
+    /// expect_ok_response returns InvalidTransactionId when the camera echoes a
+    /// transaction_id that does not match the one sent in the request.
+    ///
+    /// This guards against out-of-order or mismatched responses that would
+    /// otherwise corrupt the session state silently.
+    #[test]
+    fn expect_ok_response_rejects_mismatched_transaction_id() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        // Spin up a loopback listener on an ephemeral port.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server thread: accept one connection and write a single OperationResponse
+        // whose transaction_id is 0x99 — intentionally wrong relative to the
+        // client's expected value of 1.
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let pkt = PtpIpPacket::OperationResponse {
+                response_code: response_code::OK,
+                transaction_id: 0x99, // mismatched — client sent txn=1
+                result_params: vec![],
+            };
+            stream.write_all(&encode_packet(&pkt)).unwrap();
+        });
+
+        // Client: connect directly (bypassing the full handshake) by wrapping the
+        // raw TcpStream so we can call expect_ok_response in isolation.
+        let stream = TcpStream::connect(addr).unwrap();
+        let client = PtpIpTcpClient {
+            stream,
+            txn: TxnCounter::new(),
+            object_stream: None,
+        };
+
+        server.join().unwrap();
+
+        // Read the packet the server wrote and validate it against expected txn=1.
+        let pkt = {
+            // Re-open as read side — borrow the stream via a clone for reading.
+            // We drive read_packet via a temporary client wrapping the same fd.
+            // Simplest approach: build a second client from a loopback pair and
+            // directly call expect_ok_response with a pre-built packet.
+            PtpIpPacket::OperationResponse {
+                response_code: response_code::OK,
+                transaction_id: 0x99,
+                result_params: vec![],
+            }
+        };
+        let _ = client; // stream closed
+
+        // Direct unit test: call expect_ok_response with a mismatched packet.
+        let dummy_stream = TcpStream::connect(addr).unwrap_or_else(|_| {
+            // addr is already closed; create another pair for the dummy client.
+            let l2 = TcpListener::bind("127.0.0.1:0").unwrap();
+            let a2 = l2.local_addr().unwrap();
+            let s = TcpStream::connect(a2).unwrap();
+            let _ = l2.accept().unwrap();
+            s
+        });
+        let checker = PtpIpTcpClient {
+            stream: dummy_stream,
+            txn: TxnCounter::new(),
+            object_stream: None,
+        };
+
+        let result = checker.expect_ok_response(pkt, 1);
+        assert!(
+            matches!(result, Err(FujiError::Protocol(ProtocolError::InvalidTransactionId))),
+            "expected InvalidTransactionId, got {result:?}"
+        );
+    }
+
+    /// expect_ok_response accepts a matching transaction_id.
+    #[test]
+    fn expect_ok_response_accepts_matching_transaction_id() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let _ = listener.accept().unwrap(); // consume the server side
+
+        let checker = PtpIpTcpClient {
+            stream,
+            txn: TxnCounter::new(),
+            object_stream: None,
+        };
+
+        let pkt = PtpIpPacket::OperationResponse {
+            response_code: response_code::OK,
+            transaction_id: 1,
+            result_params: vec![],
+        };
+
+        assert!(
+            checker.expect_ok_response(pkt, 1).is_ok(),
+            "matching transaction_id must be accepted"
+        );
     }
 }
