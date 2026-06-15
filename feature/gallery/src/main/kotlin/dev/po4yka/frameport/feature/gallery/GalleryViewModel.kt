@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
-import dev.po4yka.frameport.camera.api.MediaRepository
 import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.camera.domain.ListMediaUseCase
 import dev.po4yka.frameport.core.model.FrameportError
@@ -26,17 +25,12 @@ import javax.inject.Inject
  * - MUST NOT import :camera:wifi, :camera:bluetooth, :camera:usb, or :camera:media.
  * - MUST NOT read Room or DataStore directly.
  * - All I/O runs on [viewModelScope]; never GlobalScope.
- * - [MediaRepository] is injected for thumbnail fetching (future use); thumbnails are
- *   fetched lazily per-item when the composable requests them, NOT eagerly here.
  */
 @HiltViewModel
 class GalleryViewModel
     @Inject
     constructor(
         private val listMediaUseCase: ListMediaUseCase,
-        // Injected for thumbnail access; reserved for future per-item thumbnail loading.
-        @Suppress("UnusedPrivateProperty")
-        private val mediaRepository: MediaRepository,
     ) : ViewModel() {
         private val _uiState = MutableStateFlow<GalleryUiState>(GalleryUiState.Loading)
 

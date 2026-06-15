@@ -50,7 +50,6 @@ class GalleryViewModelTest {
         viewModel =
             GalleryViewModel(
                 listMediaUseCase = useCase,
-                mediaRepository = fakeMediaRepository,
             )
     }
 
