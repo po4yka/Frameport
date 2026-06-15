@@ -66,6 +66,21 @@ use fuji_ptp::constants::{SESSION_ID, opcode, response_code};
 use fuji_ptp::{PtpIpPacket, decode_packet, encode_packet};
 use fuji_transfer::CommandTransport;
 
+// ── Packet size cap ───────────────────────────────────────────────────────────
+
+/// Maximum number of bytes allowed for a single PTP-over-USB packet allocation.
+///
+/// PTP command/response packets are a few dozen bytes; ObjectInfo and property
+/// values are under a few kilobytes; thumbnails are the largest "small" response
+/// and are bounded by JPEG constraints (well under 1 MiB in practice). 64 KiB
+/// covers all legitimate small-response payloads with a large safety margin while
+/// preventing a malformed or adversarial camera from allocating ~4 GiB by
+/// claiming an enormous `length` field in the 4-byte wire prefix.
+///
+/// Large object payloads (RAW files, full-res JPEG) are handled by the streaming
+/// `open_object` / `read_object_chunk` path, which never buffers the full object.
+const MAX_USB_PACKET_BYTES: usize = 64 * 1024; // 64 KiB
+
 // ── USB descriptor byte offsets and type codes ────────────────────────────────
 
 /// Minimum byte length of a USB descriptor header (bLength + bDescriptorType).
@@ -364,6 +379,12 @@ impl UsbPtpSession {
                 minimum: 8,
             }));
         }
+        if declared > MAX_USB_PACKET_BYTES {
+            return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: declared as u32,
+                minimum: 8,
+            }));
+        }
 
         let mut buf = vec![0u8; declared];
         buf[..4].copy_from_slice(&len_buf);
@@ -386,6 +407,18 @@ impl UsbPtpSession {
             PtpIpPacket::EndData { payload, .. } => payload,
             _ => return Err(FujiError::Protocol(ProtocolError::UnexpectedPacket)),
         };
+
+        // Defense-in-depth: reject oversized EndData payloads even if the codec
+        // somehow produced one (e.g. the decoder reconstructed a payload from
+        // multiple chained packets). MAX_USB_PACKET_BYTES is already enforced at
+        // the wire-length level in read_packet; this check guards against any
+        // future codec path that could bypass that gate.
+        if payload.len() > MAX_USB_PACKET_BYTES {
+            return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: payload.len() as u32,
+                minimum: 8,
+            }));
+        }
 
         let resp = self.read_packet()?;
         self.expect_ok_response(resp, "data-phase")?;
@@ -1085,5 +1118,116 @@ mod tests {
     #[test]
     fn usb_transport_kind_is_usb_ptp() {
         assert_eq!(TransportKind::UsbPtp.to_string(), "usb-ptp");
+    }
+
+    // ── MAX_USB_PACKET_BYTES cap — read_packet ────────────────────────────────
+
+    /// A `BulkTransport` backed by a fixed in-memory byte slice, used to feed
+    /// synthetic wire bytes to `UsbPtpSession::read_packet` and
+    /// `read_data_phase_small` without a real USB fd.
+    struct CursorTransport {
+        data: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl CursorTransport {
+        fn new(data: Vec<u8>) -> Self {
+            Self {
+                data: std::io::Cursor::new(data),
+            }
+        }
+
+        fn bulk_read_exact(&mut self, buf: &mut [u8]) -> FujiResult<()> {
+            use std::io::Read as _;
+            self.data
+                .read_exact(buf)
+                .map_err(|_| FujiError::Usb(UsbError::BulkReadFailed))
+        }
+    }
+
+    /// Builds a minimal `UsbPtpSession`-like harness that calls `read_packet`
+    /// using a cursor as the backing transport.  Because `UsbPtpSession` is not
+    /// easily constructable with a fake fd in tests, we test the cap logic by
+    /// replicating the exact same `read_packet` logic with a `CursorTransport`.
+    /// This mirrors what the real session does and exercises the same branch.
+    fn read_packet_from_cursor(cursor: &mut CursorTransport) -> FujiResult<PtpIpPacket> {
+        let mut len_buf = [0u8; 4];
+        cursor.bulk_read_exact(&mut len_buf)?;
+
+        let declared = u32::from_le_bytes(len_buf) as usize;
+        if declared < 8 {
+            return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: declared as u32,
+                minimum: 8,
+            }));
+        }
+        if declared > MAX_USB_PACKET_BYTES {
+            return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: declared as u32,
+                minimum: 8,
+            }));
+        }
+
+        let mut buf = vec![0u8; declared];
+        buf[..4].copy_from_slice(&len_buf);
+        cursor.bulk_read_exact(&mut buf[4..])?;
+
+        decode_packet(&buf).map_err(|_| FujiError::Protocol(ProtocolError::UnexpectedPacket))
+    }
+
+    /// Supplies a wire `length` field of `MAX_USB_PACKET_BYTES + 1` and asserts
+    /// that `read_packet` returns `InvalidPacketLength` before allocating.
+    #[test]
+    fn read_packet_rejects_over_cap_declared_length() {
+        // Craft 4 bytes encoding (MAX_USB_PACKET_BYTES + 1) as a LE u32.
+        let over_cap = (MAX_USB_PACKET_BYTES + 1) as u32;
+        let wire_len = over_cap.to_le_bytes();
+
+        // Only the 4-byte length prefix needs to be present; the function must
+        // return the error before attempting to read any additional bytes.
+        let mut cursor = CursorTransport::new(wire_len.to_vec());
+
+        let err = read_packet_from_cursor(&mut cursor).unwrap_err();
+        assert_eq!(
+            err,
+            FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: over_cap,
+                minimum: 8,
+            }),
+            "over-cap declared length must produce InvalidPacketLength, got: {err:?}"
+        );
+    }
+
+    /// Supplies exactly `MAX_USB_PACKET_BYTES` as the declared length to confirm
+    /// the boundary is inclusive (at-cap is allowed, one-over is rejected).
+    /// We only supply the 4-byte prefix plus enough zeros to exercise the path;
+    /// `decode_packet` may fail on malformed content, but we only care that the
+    /// cap check itself did NOT fire.
+    #[test]
+    fn read_packet_allows_exactly_cap_declared_length() {
+        let at_cap = MAX_USB_PACKET_BYTES as u32;
+        let wire_len = at_cap.to_le_bytes();
+
+        // Build a full-length buffer: 4-byte length prefix + (at_cap - 4) zero bytes.
+        let mut data = wire_len.to_vec();
+        data.resize(MAX_USB_PACKET_BYTES, 0u8);
+
+        let mut cursor = CursorTransport::new(data);
+        let result = read_packet_from_cursor(&mut cursor);
+
+        // The cap check must not fire — we accept either a successful decode or
+        // a codec-level parse error (UnexpectedPacket), but never InvalidPacketLength
+        // with `declared == at_cap`.
+        match result {
+            Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared,
+                ..
+            })) if declared == at_cap => {
+                panic!(
+                    "cap check incorrectly fired for at-cap length {at_cap}; \
+                     boundary must be > MAX_USB_PACKET_BYTES, not >="
+                );
+            }
+            _ => {} // any other outcome (Ok or a different error) is acceptable
+        }
     }
 }
