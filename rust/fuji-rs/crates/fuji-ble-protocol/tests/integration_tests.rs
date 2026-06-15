@@ -513,7 +513,9 @@ fn shooting_request_half_full_release_coverage_after_response_addition() {
 
 #[cfg(test)]
 mod proptest_advertisement {
-    use fuji_ble_protocol::advertisement::{parse_manufacturer_payload, parse_raw_manufacturer_data};
+    use fuji_ble_protocol::advertisement::{
+        parse_manufacturer_payload, parse_raw_manufacturer_data,
+    };
     use fuji_core::FujiError;
     use proptest::prelude::*;
 

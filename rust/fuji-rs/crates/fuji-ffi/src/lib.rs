@@ -772,121 +772,125 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                 // when the closure unwinds it is dropped by catch_unwind's
                 // internal unwind, releasing the JVM reference.
                 let result = catch_unwind(AssertUnwindSafe(move || {
-                // ── Obtain the cached JavaVM ───────────────────────────────────
-                let vm = match JAVA_VM.lock() {
-                    Ok(guard) => match guard.as_ref() {
-                        Some(vm) => {
-                            // SAFETY: JavaVM::clone is a pointer copy; the JVM
-                            // process stays alive for the duration of this thread.
-                            // SAFETY: We need a JavaVM to attach. The pointer in
-                            // the global Mutex is valid for the process lifetime.
-                            //
-                            // jni 0.21 JavaVM does not implement Clone directly;
-                            // we rebuild from the raw pointer.
-                            let raw = vm.get_java_vm_pointer();
-                            // SAFETY: raw is a valid *mut JavaVM pointer obtained
-                            // from a live JVM in the same process. The JVM outlives
-                            // this worker thread (daemon threads are killed at JVM
-                            // exit; we exit first via stop_flag).
-                            // No .unwrap(): on the (practically impossible) null/invalid
-                            // pointer path, close the owned fd and exit the worker cleanly
-                            // rather than panic across the thread boundary.
-                            match unsafe { JavaVM::from_raw(raw) } {
-                                Ok(vm) => vm,
-                                Err(_) => {
-                                    // SAFETY: raw_fd was produced by into_raw_fd() above; we own it.
-                                    unsafe { libc_close(raw_fd) };
-                                    return;
+                    // ── Obtain the cached JavaVM ───────────────────────────────────
+                    let vm = match JAVA_VM.lock() {
+                        Ok(guard) => match guard.as_ref() {
+                            Some(vm) => {
+                                // SAFETY: JavaVM::clone is a pointer copy; the JVM
+                                // process stays alive for the duration of this thread.
+                                // SAFETY: We need a JavaVM to attach. The pointer in
+                                // the global Mutex is valid for the process lifetime.
+                                //
+                                // jni 0.21 JavaVM does not implement Clone directly;
+                                // we rebuild from the raw pointer.
+                                let raw = vm.get_java_vm_pointer();
+                                // SAFETY: raw is a valid *mut JavaVM pointer obtained
+                                // from a live JVM in the same process. The JVM outlives
+                                // this worker thread (daemon threads are killed at JVM
+                                // exit; we exit first via stop_flag).
+                                // No .unwrap(): on the (practically impossible) null/invalid
+                                // pointer path, close the owned fd and exit the worker cleanly
+                                // rather than panic across the thread boundary.
+                                match unsafe { JavaVM::from_raw(raw) } {
+                                    Ok(vm) => vm,
+                                    Err(_) => {
+                                        // SAFETY: raw_fd was produced by into_raw_fd() above; we own it.
+                                        unsafe { libc_close(raw_fd) };
+                                        return;
+                                    }
                                 }
                             }
-                        }
-                        None => {
-                            // Close the fd we took ownership of before returning.
-                            // SAFETY: raw_fd was produced by into_raw_fd() above;
-                            // we own it and must close it on error paths.
+                            None => {
+                                // Close the fd we took ownership of before returning.
+                                // SAFETY: raw_fd was produced by into_raw_fd() above;
+                                // we own it and must close it on error paths.
+                                unsafe { libc_close(raw_fd) };
+                                return;
+                            }
+                        },
+                        Err(_) => {
                             unsafe { libc_close(raw_fd) };
                             return;
                         }
-                    },
-                    Err(_) => {
-                        unsafe { libc_close(raw_fd) };
-                        return;
-                    }
-                };
-
-                // ── Attach this thread to the JVM as a daemon ─────────────────
-                let mut jni_env = match vm.attach_current_thread_as_daemon() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        unsafe { libc_close(raw_fd) };
-                        return;
-                    }
-                };
-
-                // ── Build TcpStream from the raw fd ───────────────────────────
-                // SAFETY: raw_fd is the result of OwnedFd::into_raw_fd() on a
-                // valid, dup'd socket fd. We take exclusive ownership here;
-                // Android owns and will close the original. The TcpStream will
-                // close raw_fd when dropped (end of this thread's scope).
-                let std_stream = unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
-                // Convert to a non-blocking tokio TcpStream inside the runtime.
-
-                // ── Run a current-thread tokio runtime ────────────────────────
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(_) => {
-                        // std_stream will close raw_fd on drop.
-                        return;
-                    }
-                };
-
-                rt.block_on(async move {
-                    // Convert std TcpStream to tokio TcpStream (requires non-blocking).
-                    let _ = std_stream.set_nonblocking(true);
-                    let mut stream = match tokio::net::TcpStream::from_std(std_stream) {
-                        Ok(s) => s,
-                        Err(_) => return,
                     };
 
-                    let session = match fuji_core::SessionId::new(session_id) {
-                        Ok(s) => s,
-                        Err(_) => return,
-                    };
-                    let mut parser = LiveViewParser::new(session);
-
-                    // on_frame: called synchronously for each parsed JPEG frame.
-                    // Allocates a JVM byte[] (unavoidable JNI marshaling cost;
-                    // excluded from the Rust zero-alloc constraint per spec).
-                    // No logging on the hot path per privacy-local-first.md and
-                    // the per-frame-no-log constraint.
-                    let on_frame = |jpeg: &[u8]| {
-                        // Allocate JVM byte[] from the JPEG slice.
-                        let byte_arr = match jni_env.byte_array_from_slice(jpeg) {
-                            Ok(arr) => arr,
-                            Err(_) => return,
-                        };
-                        // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
-                        let _ = jni_env.call_method(
-                            callback_global.as_obj(),
-                            "onLiveViewFrame",
-                            "([B)V",
-                            &[JValue::Object(&byte_arr)],
-                        );
-                        // Clear any pending exception so the next frame can proceed.
-                        if jni_env.exception_check().unwrap_or(false) {
-                            let _ = jni_env.exception_clear();
+                    // ── Attach this thread to the JVM as a daemon ─────────────────
+                    let mut jni_env = match vm.attach_current_thread_as_daemon() {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            unsafe { libc_close(raw_fd) };
+                            return;
                         }
                     };
 
-                    // run_liveview_loop is cancel-safe (see fuji-liveview doc).
-                    let _ =
-                        run_liveview_loop(&mut parser, &mut stream, on_frame, &stop_flag_worker)
-                            .await;
-                    // GlobalRef (callback_global) is dropped here -> JVM reference released.
-                });
+                    // ── Build TcpStream from the raw fd ───────────────────────────
+                    // SAFETY: raw_fd is the result of OwnedFd::into_raw_fd() on a
+                    // valid, dup'd socket fd. We take exclusive ownership here;
+                    // Android owns and will close the original. The TcpStream will
+                    // close raw_fd when dropped (end of this thread's scope).
+                    let std_stream = unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
+                    // Convert to a non-blocking tokio TcpStream inside the runtime.
+
+                    // ── Run a current-thread tokio runtime ────────────────────────
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_io()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(_) => {
+                            // std_stream will close raw_fd on drop.
+                            return;
+                        }
+                    };
+
+                    rt.block_on(async move {
+                        // Convert std TcpStream to tokio TcpStream (requires non-blocking).
+                        let _ = std_stream.set_nonblocking(true);
+                        let mut stream = match tokio::net::TcpStream::from_std(std_stream) {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+
+                        let session = match fuji_core::SessionId::new(session_id) {
+                            Ok(s) => s,
+                            Err(_) => return,
+                        };
+                        let mut parser = LiveViewParser::new(session);
+
+                        // on_frame: called synchronously for each parsed JPEG frame.
+                        // Allocates a JVM byte[] (unavoidable JNI marshaling cost;
+                        // excluded from the Rust zero-alloc constraint per spec).
+                        // No logging on the hot path per privacy-local-first.md and
+                        // the per-frame-no-log constraint.
+                        let on_frame = |jpeg: &[u8]| {
+                            // Allocate JVM byte[] from the JPEG slice.
+                            let byte_arr = match jni_env.byte_array_from_slice(jpeg) {
+                                Ok(arr) => arr,
+                                Err(_) => return,
+                            };
+                            // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
+                            let _ = jni_env.call_method(
+                                callback_global.as_obj(),
+                                "onLiveViewFrame",
+                                "([B)V",
+                                &[JValue::Object(&byte_arr)],
+                            );
+                            // Clear any pending exception so the next frame can proceed.
+                            if jni_env.exception_check().unwrap_or(false) {
+                                let _ = jni_env.exception_clear();
+                            }
+                        };
+
+                        // run_liveview_loop is cancel-safe (see fuji-liveview doc).
+                        let _ = run_liveview_loop(
+                            &mut parser,
+                            &mut stream,
+                            on_frame,
+                            &stop_flag_worker,
+                        )
+                        .await;
+                        // GlobalRef (callback_global) is dropped here -> JVM reference released.
+                    });
                 })); // end catch_unwind
 
                 // On panic: raw_fd may still be open if the panic occurred before

@@ -703,7 +703,10 @@ mod tests {
 
         let result = checker.expect_ok_response(pkt, 1);
         assert!(
-            matches!(result, Err(FujiError::Protocol(ProtocolError::InvalidTransactionId))),
+            matches!(
+                result,
+                Err(FujiError::Protocol(ProtocolError::InvalidTransactionId))
+            ),
             "expected InvalidTransactionId, got {result:?}"
         );
     }
