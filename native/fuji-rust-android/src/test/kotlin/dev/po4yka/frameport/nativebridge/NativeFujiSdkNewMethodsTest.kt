@@ -104,8 +104,8 @@ class NativeFujiSdkNewMethodsTest {
         val ex = result.exceptionOrNull()
         assertNotNull("failure must carry an exception", ex)
         assertTrue(
-            "exception must be IllegalStateException or NativeException; was ${ex!!::class.simpleName}",
-            ex is IllegalStateException || ex is NativeException,
+            "exception must be IllegalStateException, NativeException, or NativeBridgeError; was ${ex!!::class.simpleName}",
+            ex is IllegalStateException || ex is NativeException || ex is NativeBridgeError,
         )
     }
 

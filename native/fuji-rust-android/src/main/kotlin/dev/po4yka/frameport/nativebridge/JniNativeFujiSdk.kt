@@ -56,7 +56,7 @@ class JniNativeFujiSdk(
                         ),
                     )
                 } else {
-                    Result.failure(IllegalStateException("native_open_noop_session failed with code $sessionId"))
+                    Result.failure(sessionId.toInt().toSessionError("native_open_noop_session"))
                 }
             },
             fallbackCall = fallback::openNoopSession,
@@ -88,9 +88,7 @@ class JniNativeFujiSdk(
                         ),
                     )
                 } else {
-                    Result.failure(
-                        IllegalStateException("native_open_wifi_session failed with code $sessionId"),
-                    )
+                    Result.failure(sessionId.toInt().toSessionError("native_open_wifi_session"))
                 }
             },
             fallbackCall = { fallback.openWifiSession(commandFd, endpointMetadata) },
@@ -104,7 +102,7 @@ class JniNativeFujiSdk(
                     Result.success(bytes)
                 } else {
                     Result.failure(
-                        IllegalStateException("native_list_media failed: null result for session ${session.id}"),
+                        NativeBridgeError.InvalidSession("native_list_media", NativeFujiJni.ERR_INVALID_SESSION),
                     )
                 }
             },
@@ -122,9 +120,7 @@ class JniNativeFujiSdk(
                     Result.success(bytes)
                 } else {
                     Result.failure(
-                        IllegalStateException(
-                            "native_get_thumbnail failed: null result for session ${session.id} handle $objectHandle",
-                        ),
+                        NativeBridgeError.InvalidSession("native_get_thumbnail", NativeFujiJni.ERR_INVALID_SESSION),
                     )
                 }
             },
@@ -187,9 +183,7 @@ class JniNativeFujiSdk(
                 if (sessionId > 0L) {
                     Result.success(sessionId)
                 } else {
-                    Result.failure(
-                        IllegalStateException("native_usb_session_open failed with code $sessionId"),
-                    )
+                    Result.failure(sessionId.toInt().toSessionError("native_usb_session_open"))
                 }
             },
             fallbackCall = { fallback.openUsbSession(fd, descriptors) },
@@ -235,10 +229,27 @@ class JniNativeFujiSdk(
         }
     }
 
+    /**
+     * Maps a JNI integer sentinel to a typed [Result].
+     * 0 ([NativeFujiJni.OK]) -> success; negative sentinels -> [NativeBridgeError].
+     */
     private fun Int.toUnitResult(operation: String): Result<Unit> =
-        if (this == 0) {
+        if (this == NativeFujiJni.OK) {
             Result.success(Unit)
         } else {
-            Result.failure(IllegalStateException("$operation failed with code $this"))
+            Result.failure(toSessionError(operation))
+        }
+
+    /**
+     * Maps a known negative JNI sentinel integer to the appropriate [NativeBridgeError] subtype.
+     * Negative session-id returns from [nativeOpenNoopSession], [nativeOpenWifiSession], and
+     * [nativeUsbSessionOpen] are cast to [Int] before calling this helper.
+     */
+    private fun Int.toSessionError(operation: String): NativeBridgeError =
+        when (this) {
+            NativeFujiJni.ERR_NOT_INITIALIZED -> NativeBridgeError.NotInitialized(operation)
+            NativeFujiJni.ERR_INVALID_SESSION -> NativeBridgeError.InvalidSession(operation, this)
+            NativeFujiJni.ERR_PANIC -> NativeBridgeError.Panic(operation)
+            else -> NativeBridgeError.Unknown(operation, this)
         }
 }
