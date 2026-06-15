@@ -706,6 +706,11 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
         // pattern for JNI daemon attachment: we attach once at thread start,
         // run the full async loop, detach on exit. JNIEnv is NEVER moved across
         // thread boundaries — it is obtained fresh inside the worker.
+        // OWNERSHIP: raw_fd is unguarded from into_raw_fd(); every error path
+        // after it (including spawn failure) must close it explicitly.
+        // The closure captures raw_fd by copy (RawFd: Copy), so if spawn()
+        // returns Err the closure is dropped without running and no destructor
+        // fires — we must call libc_close(raw_fd) on that branch ourselves.
         let raw_fd = {
             use std::os::fd::IntoRawFd;
             owned_fd.into_raw_fd()
@@ -833,7 +838,15 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
 
         let join_handle = match worker {
             Ok(jh) => jh,
-            Err(_) => return ERR_PANIC,
+            Err(_) => {
+                // The closure was never executed, so raw_fd has not been closed.
+                // RawFd is Copy — no destructor fires on drop — so we must close
+                // it here to avoid leaking the fd for the process lifetime.
+                // SAFETY: raw_fd was produced by into_raw_fd() above; we hold
+                // the only copy at this point (spawn failed, closure was dropped).
+                unsafe { libc_close(raw_fd) };
+                return ERR_PANIC;
+            }
         };
 
         // ── Register the handle in the live-view registry ─────────────────────
