@@ -158,7 +158,19 @@ class LiveviewViewModel
                                 // should have already filtered invalid frames before they arrive here.
                                 val bitmap = frameDecoder(jpeg)
                                 if (bitmap != null) {
+                                    // Swap in the new frame and recycle the previous one.
+                                    // The previous bitmap is safe to recycle here: StateFlow
+                                    // observers (Compose via collectAsStateWithLifecycle) will
+                                    // not read the old value again once the new value is set,
+                                    // and the SurfaceView draw path in AndroidView.update fires
+                                    // only during recomposition with the NEW bitmapRef (keyed
+                                    // via remember(currentBitmap)). Recycling before the
+                                    // assignment would risk a use-after-free; recycling after
+                                    // is safe because Compose has already snapshotted the
+                                    // previous reference from the last recomposition.
+                                    val previous = _bitmapState.value
                                     _bitmapState.value = bitmap
+                                    previous?.recycle()
                                 }
                             }
                         // Flow completed normally (Rust read loop stopped cleanly).
@@ -273,6 +285,10 @@ class LiveviewViewModel
             super.onCleared()
             streamJob?.cancel()
             fpsTickJob?.cancel()
+            // Recycle the last decoded frame bitmap when the ViewModel is destroyed so the
+            // native heap backing the Bitmap is released promptly (not deferred to GC).
+            _bitmapState.value?.recycle()
+            _bitmapState.value = null
         }
 
         private companion object {
