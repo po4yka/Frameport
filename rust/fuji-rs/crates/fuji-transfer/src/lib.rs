@@ -22,7 +22,7 @@
 //! # Privacy
 //!
 //! Raw filenames from the camera are never stored in domain structs.  They are hashed
-//! (FNV-1a 64-bit, stable across sessions) and stored as hex strings in
+//! (SHA-256, first 64 bits as hex, stable across sessions) and stored as hex strings in
 //! [`fuji_core::CameraMediaObject::filename_opaque_hash`].
 //!
 //! # Safety
@@ -147,7 +147,7 @@ pub fn list_media(t: &mut dyn CommandTransport) -> FujiResult<Vec<CameraMediaObj
         let filename_opaque_hash = if info.filename.is_empty() {
             None
         } else {
-            Some(fnv1a_hex(&info.filename))
+            Some(sha256_hex_prefix(&info.filename))
         };
 
         objects.push(CameraMediaObject {
@@ -422,22 +422,134 @@ fn leap_years_since_1970(year: i64) -> i64 {
     leaps(y) - leaps(from)
 }
 
-/// FNV-1a 64-bit hash of a string, returned as a 16-character lowercase hex string.
+/// SHA-256 hash of a UTF-8 string, returned as a 16-character (64-bit) lowercase hex prefix.
 ///
-/// This is a stable, non-cryptographic hash used as a privacy-preserving
-/// opaque filename identifier.  The raw filename is never stored.
+/// Used as a privacy-preserving opaque filename identifier.  The raw filename is never
+/// stored.  SHA-256 is cryptographically one-way; FNV-1a (the previous implementation)
+/// was trivially reversible for the short, predictable filenames produced by Fujifilm
+/// cameras (e.g. `DSCF0001.JPG`).
 ///
-/// FNV-1a is std-based (no external crate), deterministic across platforms,
-/// and fast for the short filenames typical of camera objects.
-fn fnv1a_hex(s: &str) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash: u64 = FNV_OFFSET;
-    for byte in s.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
+/// The output is the first 8 bytes (16 hex chars) of the SHA-256 digest — 64 bits of
+/// collision resistance, sufficient for a local media catalog of any plausible size.
+///
+/// # TODO
+///
+/// Add a per-install random salt (stored in encrypted DataStore) to prevent
+/// cross-device correlation of hashes.  The salt store is not yet available in v1;
+/// unsalted SHA-256 is used in the interim.
+fn sha256_hex_prefix(s: &str) -> String {
+    let digest = sha256(s.as_bytes());
+    // First 8 bytes → 16 hex chars.
+    let mut out = String::with_capacity(16);
+    for b in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
     }
-    format!("{hash:016x}")
+    out
+}
+
+/// Minimal pure-Rust SHA-256 implementation (no external crate).
+///
+/// Follows FIPS 180-4.  Suitable for short inputs (filenames) where performance
+/// is not a concern.  Constant-time is not guaranteed; this is NOT for MAC/HMAC.
+fn sha256(msg: &[u8]) -> [u8; 32] {
+    // Initial hash values: first 32 bits of the fractional parts of the square
+    // roots of the first 8 primes.
+    #[allow(clippy::unreadable_literal)]
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    // Round constants: first 32 bits of the fractional parts of the cube roots
+    // of the first 64 primes.
+    #[allow(clippy::unreadable_literal)]
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    // Pre-processing: pad the message.
+    let bit_len = (msg.len() as u64).wrapping_mul(8);
+    let mut padded: Vec<u8> = Vec::with_capacity(msg.len() + 73);
+    padded.extend_from_slice(msg);
+    padded.push(0x80);
+    // Pad to 56 mod 64 bytes.
+    while padded.len() % 64 != 56 {
+        padded.push(0x00);
+    }
+    // Append original length as 64-bit big-endian.
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    // Process each 512-bit (64-byte) block.
+    for block in padded.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, chunk) in block.chunks_exact(4).enumerate().take(16) {
+            w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    // Produce the 32-byte digest.
+    let mut digest = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        digest[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -446,22 +558,29 @@ fn fnv1a_hex(s: &str) -> String {
 mod tests {
     use super::*;
 
-    // ── FNV-1a hash ───────────────────────────────────────────────────────────
+    // ── SHA-256 prefix hash ───────────────────────────────────────────────────
 
     #[test]
-    fn fnv1a_hex_empty_is_16_chars() {
-        let h = fnv1a_hex("");
+    fn sha256_hex_prefix_empty_is_16_chars() {
+        let h = sha256_hex_prefix("");
         assert_eq!(h.len(), 16);
     }
 
     #[test]
-    fn fnv1a_hex_same_input_same_output() {
-        assert_eq!(fnv1a_hex("DSCF0001.JPG"), fnv1a_hex("DSCF0001.JPG"));
+    fn sha256_hex_prefix_same_input_same_output() {
+        assert_eq!(sha256_hex_prefix("DSCF0001.JPG"), sha256_hex_prefix("DSCF0001.JPG"));
     }
 
     #[test]
-    fn fnv1a_hex_different_inputs_different_outputs() {
-        assert_ne!(fnv1a_hex("DSCF0001.JPG"), fnv1a_hex("DSCF0002.JPG"));
+    fn sha256_hex_prefix_different_inputs_different_outputs() {
+        assert_ne!(sha256_hex_prefix("DSCF0001.JPG"), sha256_hex_prefix("DSCF0002.JPG"));
+    }
+
+    #[test]
+    fn sha256_hex_prefix_known_vector() {
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469f492c89519e0cf4b3
+        // First 8 bytes → "ba7816bf8f01cfea"
+        assert_eq!(sha256_hex_prefix("abc"), "ba7816bf8f01cfea");
     }
 
     // ── PTP date parsing ──────────────────────────────────────────────────────
