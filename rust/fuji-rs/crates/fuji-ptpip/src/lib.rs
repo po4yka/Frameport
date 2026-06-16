@@ -67,6 +67,12 @@ use fuji_ptp::{PtpIpPacket, decode_packet, encode_packet};
 /// declares a thumbnail larger than this value.
 pub const MAX_THUMBNAIL_BYTES: u64 = 512 * 1024;
 
+/// Maximum command-channel PTP-IP packet size decoded in one allocation.
+///
+/// Bulk object payloads must use `open_object` + `read_object_chunk`; this cap
+/// only applies to command responses, handshake packets, and small data phases.
+const MAX_CONTROL_PACKET_BYTES: usize = 4096;
+
 // ── Transaction ID counter ────────────────────────────────────────────────────
 
 /// Monotonically incrementing transaction ID.
@@ -461,10 +467,10 @@ impl PtpIpTcpClient {
 
     /// Reads one length-prefixed PTP-IP packet from the stream.
     ///
-    /// Reads the 4-byte length prefix first, allocates exactly that many bytes,
-    /// then calls `decode_packet`.  Safe for small packets (handshake, responses,
-    /// StartData, small EndData).  NOT for use with bulk object payloads — use
-    /// [`read_object_chunk`](Self::read_object_chunk) instead.
+    /// Reads the 4-byte length prefix first, rejects impossible control-packet
+    /// lengths, then calls `decode_packet`. Safe for small packets (handshake,
+    /// responses, StartData, small EndData). NOT for use with bulk object
+    /// payloads — use [`read_object_chunk`](Self::read_object_chunk) instead.
     fn read_packet(&mut self) -> FujiResult<PtpIpPacket> {
         let mut len_buf = [0u8; 4];
         self.stream
@@ -473,6 +479,12 @@ impl PtpIpTcpClient {
 
         let declared = u32::from_le_bytes(len_buf) as usize;
         if declared < 8 {
+            return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: declared as u32,
+                minimum: 8,
+            }));
+        }
+        if declared > MAX_CONTROL_PACKET_BYTES {
             return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
                 declared: declared as u32,
                 minimum: 8,
@@ -632,6 +644,72 @@ mod tests {
             open_from_owned_socket_fd(3),
             Err(FujiError::NotImplemented(_))
         ));
+    }
+
+    #[test]
+    fn read_packet_rejects_over_cap_declared_length() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let over_cap = (MAX_CONTROL_PACKET_BYTES + 1) as u32;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(&over_cap.to_le_bytes()).unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let mut client = PtpIpTcpClient {
+            stream,
+            txn: TxnCounter::new(),
+            object_stream: None,
+        };
+
+        let err = client.read_packet().unwrap_err();
+        assert_eq!(
+            err,
+            FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                declared: over_cap,
+                minimum: 8,
+            }),
+            "over-cap declared length must fail before allocating: {err:?}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn read_packet_allows_exactly_cap_declared_length() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let at_cap = MAX_CONTROL_PACKET_BYTES as u32;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut data = at_cap.to_le_bytes().to_vec();
+            data.resize(MAX_CONTROL_PACKET_BYTES, 0u8);
+            stream.write_all(&data).unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let mut client = PtpIpTcpClient {
+            stream,
+            txn: TxnCounter::new(),
+            object_stream: None,
+        };
+
+        let result = client.read_packet();
+        match result {
+            Err(FujiError::Protocol(ProtocolError::InvalidPacketLength { declared, .. }))
+                if declared == at_cap =>
+            {
+                panic!("cap check must allow exactly MAX_CONTROL_PACKET_BYTES")
+            }
+            _ => {}
+        }
+        server.join().unwrap();
     }
 
     /// expect_ok_response returns InvalidTransactionId when the camera echoes a
