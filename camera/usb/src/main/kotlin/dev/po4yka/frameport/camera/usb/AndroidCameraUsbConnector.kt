@@ -87,7 +87,9 @@ class AndroidCameraUsbConnector
         // ConcurrentHashMap: BroadcastReceiver callbacks may arrive on an arbitrary thread.
         private val detectedDevices = ConcurrentHashMap<String, UsbDevice>()
 
-        // Tracks whether the detach receiver is registered so we only unregister once.
+        // Tracks whether the app-lifetime USB receiver is active.
+        // The connector is a singleton, so close() must not unregister this receiver:
+        // later USB sessions in the same process still need attach/detach/permission broadcasts.
         private val receiverRegistered = AtomicBoolean(false)
 
         // The active UsbDeviceConnection. Accessed only within withContext(IO) blocks, but
@@ -437,6 +439,7 @@ class AndroidCameraUsbConnector
 
                 val sessionId = openResult.getOrThrow()
                 val handle = UsbTransportHandle(sessionId)
+                closedOnce.set(false)
 
                 _state.value = UsbSessionState.UsbSessionReady(handle)
                 Timber.tag(TAG).d("openSession: UsbSessionReady sessionId=%d", sessionId.value)
@@ -462,18 +465,9 @@ class AndroidCameraUsbConnector
                 _state.value = UsbSessionState.Closing
                 Timber.tag(TAG).d("close: Closing sessionId=%d", handle.sessionId.value)
 
-                // Unregister the BroadcastReceiver exactly once. The compareAndSet prevents a
-                // double-unregister if close() were somehow raced (closedOnce already guards
-                // this, but the explicit CAS here keeps the receiver lifecycle self-contained).
-                if (receiverRegistered.compareAndSet(true, false)) {
-                    try {
-                        context.unregisterReceiver(usbEventReceiver)
-                        Timber.tag(TAG).d("close: BroadcastReceiver unregistered")
-                    } catch (e: IllegalArgumentException) {
-                        // Receiver was never registered or already unregistered — safe to ignore.
-                        Timber.tag(TAG).d("close: unregisterReceiver no-op: %s", e.message)
-                    }
-                }
+                // Keep the BroadcastReceiver registered for the lifetime of this @Singleton.
+                // close() only ends the active session; unregistering here would permanently
+                // disable attach/detach/permission broadcasts for later sessions in this process.
 
                 // Tell Rust to release the USB session and its OwnedFd (closes the dup).
                 try {
