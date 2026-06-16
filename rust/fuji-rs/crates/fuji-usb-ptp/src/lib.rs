@@ -395,7 +395,7 @@ impl UsbPtpSession {
     ///
     /// Buffers the EndData payload — only safe for bounded payloads
     /// (property values, ObjectInfo).
-    fn read_data_phase_small(&mut self, _expected_txn: u32) -> FujiResult<Vec<u8>> {
+    fn read_data_phase_small(&mut self, expected_txn: u32) -> FujiResult<Vec<u8>> {
         match self.read_packet()? {
             PtpIpPacket::StartData { .. } => {}
             _ => return Err(FujiError::Protocol(ProtocolError::UnexpectedPacket)),
@@ -419,17 +419,27 @@ impl UsbPtpSession {
         }
 
         let resp = self.read_packet()?;
-        self.expect_ok_response(resp, "data-phase")?;
+        self.expect_ok_response(resp, expected_txn)?;
 
         Ok(payload)
     }
 
-    /// Validates that `pkt` is an `OperationResponse` with `response_code == OK`.
-    fn expect_ok_response(&self, pkt: PtpIpPacket, _op: &str) -> FujiResult<()> {
+    /// Validates that `pkt` is an `OperationResponse` with `response_code == OK`
+    /// and that its echoed `transaction_id` matches `expected_txn`.
+    ///
+    /// Returns [`ProtocolError::InvalidTransactionId`] when the camera echoes a
+    /// transaction ID that does not match the one sent in the request — an
+    /// out-of-order or mismatched response would otherwise corrupt the session.
+    fn expect_ok_response(&self, pkt: PtpIpPacket, expected_txn: u32) -> FujiResult<()> {
         match pkt {
-            PtpIpPacket::OperationResponse { response_code, .. }
-                if response_code == response_code::OK =>
-            {
+            PtpIpPacket::OperationResponse {
+                response_code,
+                transaction_id,
+                ..
+            } if response_code == response_code::OK => {
+                if transaction_id != expected_txn {
+                    return Err(FujiError::Protocol(ProtocolError::InvalidTransactionId));
+                }
                 Ok(())
             }
             PtpIpPacket::OperationResponse { response_code, .. }
@@ -466,7 +476,7 @@ impl UsbPtpSession {
         self.write_packet(&req)?;
 
         let resp = self.read_packet()?;
-        self.expect_ok_response(resp, "OpenSession")
+        self.expect_ok_response(resp, 0)
     }
 }
 
@@ -536,7 +546,7 @@ impl CommandTransport for UsbPtpSession {
         };
 
         let resp = self.read_packet()?;
-        self.expect_ok_response(resp, "GetThumb")?;
+        self.expect_ok_response(resp, txn)?;
 
         Ok((declared, payload))
     }
@@ -643,7 +653,7 @@ impl CommandTransport for UsbPtpSession {
             let _ = txn_id;
 
             let resp = self.read_packet()?;
-            self.expect_ok_response(resp, "GetObject")?;
+            self.expect_ok_response(resp, txn_id)?;
             return Ok(0);
         }
 
@@ -748,6 +758,24 @@ pub fn download_usb_object(
 mod tests {
     use super::*;
 
+    fn dummy_session() -> UsbPtpSession {
+        use std::os::unix::io::IntoRawFd;
+
+        let file = File::open("/dev/null").expect("open /dev/null");
+        let raw_fd = file.into_raw_fd();
+        // SAFETY: exclusive ownership transferred from File::into_raw_fd.
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        UsbPtpSession {
+            transport: BulkTransport::from_owned_fd(owned_fd),
+            txn: TxnCounter::new(),
+            object_stream: None,
+            transport_kind: TransportKind::UsbPtp,
+            bulk_in_addr: 0x81,
+            bulk_out_addr: 0x02,
+        }
+    }
+
     // ── TxnCounter ────────────────────────────────────────────────────────────
 
     #[test]
@@ -763,6 +791,53 @@ mod tests {
         let mut c = TxnCounter(0xFFFF_FFFE);
         assert_eq!(c.next(), 1, "0xFFFFFFFE wraps to 1");
         assert_eq!(c.next(), 2);
+    }
+
+    #[test]
+    fn expect_ok_response_accepts_matching_transaction_id() {
+        let session = dummy_session();
+        let pkt = PtpIpPacket::OperationResponse {
+            response_code: response_code::OK,
+            transaction_id: 7,
+            result_params: vec![],
+        };
+
+        assert!(session.expect_ok_response(pkt, 7).is_ok());
+    }
+
+    #[test]
+    fn expect_ok_response_rejects_mismatched_transaction_id() {
+        let session = dummy_session();
+        let pkt = PtpIpPacket::OperationResponse {
+            response_code: response_code::OK,
+            transaction_id: 99,
+            result_params: vec![],
+        };
+
+        let err = session.expect_ok_response(pkt, 7).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FujiError::Protocol(ProtocolError::InvalidTransactionId)
+            ),
+            "mismatched OK response must return InvalidTransactionId, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn expect_ok_response_preserves_non_ok_error_mapping() {
+        let session = dummy_session();
+        let pkt = PtpIpPacket::OperationResponse {
+            response_code: response_code::INVALID_OBJECT_HANDLE,
+            transaction_id: 99,
+            result_params: vec![],
+        };
+
+        let err = session.expect_ok_response(pkt, 7).unwrap_err();
+        assert!(
+            matches!(err, FujiError::Transfer(TransferError::ObjectNotFound)),
+            "non-OK responses should preserve typed error mapping, got {err:?}"
+        );
     }
 
     // ── parse_endpoints ───────────────────────────────────────────────────────
