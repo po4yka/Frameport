@@ -137,11 +137,12 @@ fun defaultCategory(layer: ErrorLayer): DiagnosticCategory =
 /**
  * A single structured diagnostic event in the Frameport diagnostics pipeline.
  *
- * PRIVACY INVARIANTS (enforced by callers and [DiagnosticCollector]):
- *  - [message] must already be redacted before construction. No raw device
- *    serial numbers, MAC addresses, SSIDs, passphrases, IPs, GPS coordinates,
- *    or raw filenames may appear in this field.
- *  - [metadata] values must be pre-redacted by the caller. Keys may be plain text.
+ * PRIVACY INVARIANTS:
+ *  - Production ingestion through [DiagnosticsRepository.recordEvent] redacts
+ *    [message], [metadata] values, and [sessionId] before storage/export.
+ *  - Callers should still avoid intentionally collecting secrets or raw user content.
+ *    Redaction at ingestion is a defense-in-depth boundary, not permission to capture
+ *    unnecessary data.
  *  - [sessionId] is an opaque handle, never a raw device identifier.
  *
  * Use the [diagnosticEvent] factory to stamp [timestamp] automatically.
@@ -150,9 +151,9 @@ data class DiagnosticEvent(
     val timestamp: Instant,
     val layer: ErrorLayer,
     val category: DiagnosticCategory,
-    /** Already-redacted human-readable description. MUST NOT contain raw device identifiers. */
+    /** Human-readable description. Redacted by the production diagnostics ingestion path. */
     val message: String,
-    /** Pre-redacted key→value pairs for structured context. Values must be sanitised by caller. */
+    /** Key→value pairs for structured context. Values are redacted at production ingestion. */
     val metadata: Map<String, String> = emptyMap(),
     /** Opaque session handle. MUST NOT be a raw device id (serial, MAC, IP). */
     val sessionId: String = "",
@@ -166,8 +167,8 @@ data class DiagnosticEvent(
  *
  * @param layer The architectural layer that produced this event.
  * @param category The specific [DiagnosticCategory] within that layer.
- * @param message Already-redacted description. No raw device identifiers.
- * @param metadata Pre-redacted structured context. Values must be sanitised by the caller.
+ * @param message Description; production diagnostics ingestion redacts sensitive tokens.
+ * @param metadata Structured context; production diagnostics ingestion redacts values.
  * @param sessionId Opaque session handle. Must not be a raw device identifier.
  * @param at Timestamp; defaults to [Instant.now]. Override in tests only.
  */

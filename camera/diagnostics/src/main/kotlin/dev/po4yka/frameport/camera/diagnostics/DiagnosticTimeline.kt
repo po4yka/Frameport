@@ -25,8 +25,8 @@ import javax.inject.Singleton
  * thread-safe. [append] may be called from any thread without additional synchronisation.
  *
  * PRIVACY: this class stores whatever [DiagnosticEvent] instances it receives; it does
- * NOT perform redaction. Callers (i.e. [DiagnosticCollector]) are responsible for
- * ensuring events are pre-redacted before [append] is called.
+ * NOT perform redaction. [DiagnosticCollector] is the single production write path and
+ * redacts events before [append] is called.
  */
 @Singleton
 class DiagnosticTimeline

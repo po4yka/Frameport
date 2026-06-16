@@ -17,8 +17,8 @@ import javax.inject.Singleton
  *  - [recordEvent] delegates to [DiagnosticCollector.record], which forwards to
  *    [DiagnosticTimeline.append] and emits a redacted Timber log entry.
  *
- * PRIVACY: this class performs no redaction. Pre-redacted [DiagnosticEvent] instances
- * must be passed to [recordEvent]; see [DiagnosticCollector] and [RedactionPipeline].
+ * PRIVACY: [recordEvent] is the public ingestion boundary and delegates to
+ * [DiagnosticCollector], which redacts event text before timeline storage/export.
  */
 @Singleton
 class DiagnosticsRepositoryImpl

@@ -26,8 +26,8 @@ import javax.inject.Singleton
  *  - App version is read from [Context.packageManager] — NOT BuildConfig, which is
  *    unavailable in library modules.
  *  - No network calls, no upload path. This class is entirely local.
- *  - Events must have been pre-redacted by [DiagnosticCollector] before reaching
- *    [DiagnosticTimeline]; this exporter does not perform additional redaction.
+ *  - Events are redacted by [DiagnosticCollector] before reaching [DiagnosticTimeline];
+ *    this exporter does not perform additional redaction.
  *
  * Schema version: 1 (literal integer in manifest.json).
  */

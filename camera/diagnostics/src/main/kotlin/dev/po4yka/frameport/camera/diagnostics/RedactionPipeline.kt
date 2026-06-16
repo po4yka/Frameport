@@ -23,6 +23,21 @@ class RedactionPipeline
     @Inject
     constructor() {
         /**
+         * Best-effort sanitizer for untrusted diagnostic text at ingestion boundaries.
+         *
+         * This is intentionally conservative: it preserves category-level wording while
+         * replacing values that are private by policy before they reach the timeline,
+         * logs, or exported bundles.
+         */
+        fun redactDiagnosticText(raw: String): String {
+            var sanitized = raw
+            replacementRules.forEach { (pattern, replacement) ->
+                sanitized = pattern.replace(sanitized, replacement)
+            }
+            return sanitized
+        }
+
+        /**
          * Returns "serial:" + lowercase SHA-256 hex of [raw].
          * Deterministic: two events with the same raw serial produce matching hashes.
          */
@@ -64,5 +79,20 @@ class RedactionPipeline
             val digest = MessageDigest.getInstance("SHA-256")
             val bytes = digest.digest(input.toByteArray(Charsets.UTF_8))
             return bytes.joinToString("") { "%02x".format(it) }
+        }
+
+        private companion object {
+            private val replacementRules: List<Pair<Regex, String>> =
+                listOf(
+                    Regex("""(?i)\b(content|file)://[^\s,;]+""") to "<redacted-uri>",
+                    Regex("""(?i)(\b(?:passphrase|password|secret|token|pairing[-_ ]?key)\b\s*[:=]\s*)[^\s,;]+""") to "\$1<redacted-secret>",
+                    Regex("""(?i)(\b(?:serial|serialNumber|cameraSerial)\b\s*[:=]\s*)[A-Z0-9][A-Z0-9_-]{3,}""") to "\$1<redacted-serial>",
+                    Regex("""(?i)(\bssid\b\s*[:=]\s*)[^,;]+""") to "\$1<redacted-ssid>",
+                    Regex("""\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b""") to "<redacted-mac>",
+                    Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""") to "<redacted-ip>",
+                    Regex("""[-+]?\d{1,2}\.\d{3,}\s*,\s*[-+]?\d{1,3}\.\d{3,}""") to "<redacted-gps>",
+                    Regex("""(?i)\b\S+\.(?:raf|jpe?g|mov|mp4|heif|hif|dng)\b""") to "<redacted-filename>",
+                    Regex("""(?:/[^/\s,;]+){2,}""") to "<redacted-path>",
+                )
         }
     }

@@ -18,13 +18,10 @@ import javax.inject.Singleton
  * applied consistently.
  *
  * PRIVACY INVARIANTS enforced here:
- *  - [record]: the caller is responsible for pre-redacting [DiagnosticEvent.message]
- *    and all [DiagnosticEvent.metadata] values before calling [record]. This class
- *    does NOT re-redact an already-built event; it forwards it to [DiagnosticTimeline].
- *  - [recordError]: the message is sourced exclusively from [FrameportError.message],
- *    which must not contain raw device identifiers. Context values passed via [context]
- *    are treated as caller-redacted. Raw ids MUST be hashed via [RedactionPipeline]
- *    before being placed in [context].
+ *  - [record]: [DiagnosticEvent.message], [DiagnosticEvent.metadata] values, and
+ *    [DiagnosticEvent.sessionId] are redacted before storage or broadcast.
+ *  - [recordError]: [FrameportError.message] and [context] values are redacted by
+ *    the same [record] path before they enter [DiagnosticTimeline].
  *  - Timber calls use only the category name and a fixed description — no raw ids.
  *
  * Thread-safety: [DiagnosticTimeline.append] is thread-safe; [record] and [recordError]
@@ -35,33 +32,28 @@ class DiagnosticCollector
     @Inject
     constructor(
         private val timeline: DiagnosticTimeline,
-        @Suppress("UnusedPrivateMember")
         private val redactionPipeline: RedactionPipeline,
     ) {
         /**
-         * Appends a pre-built [event] to the timeline.
-         *
-         * The caller is responsible for ensuring [event.message] and all [event.metadata]
-         * values are already redacted. This method does not inspect or modify the event.
+         * Appends [event] to the timeline after redacting all caller-supplied text values.
          */
         fun record(event: DiagnosticEvent) {
             // cancel-safe: DiagnosticTimeline.append is non-suspending and thread-safe.
-            timeline.append(event)
+            val redactedEvent = event.redacted()
+            timeline.append(redactedEvent)
             // Log at DEBUG — category name only; no raw identifiers.
-            Timber.d("DiagnosticEvent recorded: layer=%s category=%s", event.layer, event.category)
+            Timber.d("DiagnosticEvent recorded: layer=%s category=%s", redactedEvent.layer, redactedEvent.category)
         }
 
         /**
          * Builds and records a [DiagnosticEvent] from a typed [FrameportError].
          *
-         * The event message is taken from [cause.message], which must not contain raw
-         * device identifiers. Values in [context] must be caller-redacted (e.g. via
-         * [RedactionPipeline]) before being passed here.
+         * The event message is taken from [cause.message]. [record] redacts the final
+         * event before storage, so callers do not need a separate redaction step.
          *
          * @param layer The architectural layer where the error originated.
          * @param cause Typed error; [FrameportError.message] becomes the event message.
-         * @param context Pre-redacted key→value metadata. MUST NOT contain raw serial /
-         *   MAC / SSID / IP / GPS / filename values.
+         * @param context Key→value metadata. Values are redacted before storage.
          */
         fun recordError(
             layer: ErrorLayer,
@@ -80,4 +72,11 @@ class DiagnosticCollector
             // Log at WARN — layer and category only; cause.message is already redacted per contract.
             Timber.w("DiagnosticError recorded: layer=%s", layer)
         }
+
+        private fun DiagnosticEvent.redacted(): DiagnosticEvent =
+            copy(
+                message = redactionPipeline.redactDiagnosticText(message),
+                metadata = metadata.mapValues { (_, value) -> redactionPipeline.redactDiagnosticText(value) },
+                sessionId = redactionPipeline.redactDiagnosticText(sessionId),
+            )
     }
