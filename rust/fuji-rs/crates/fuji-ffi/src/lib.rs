@@ -182,8 +182,9 @@ pub fn native_close_session(session_id: i64) -> i32 {
 ///
 /// # Fd ownership
 /// `command_fd` is Android-owned. Rust dups it immediately and stores the
-/// OwnedFd keyed by the new session id. Android keeps and closes the original;
-/// Rust closes its dup when the session is closed or the library shuts down.
+/// OwnedFd keyed by the new session id. The Kotlin caller closes `command_fd`
+/// after this function returns; Rust closes only its dup when the session is
+/// closed or the library shuts down.
 pub fn native_open_wifi_session(command_fd: i32) -> i64 {
     if !INITIALIZED.load(Ordering::SeqCst) {
         return i64::from(ERR_NOT_INITIALIZED);
@@ -544,10 +545,11 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
 
 /// Open a Wi-Fi PTP-IP session.
 ///
-/// `command_fd` must be a valid Android-owned socket fd (>= 0). Rust dups it
-/// immediately and stores the OwnedFd. Returns the session id (> 0) on
-/// success, or a negative ERR_* sentinel on expected failure. Panics are
-/// caught and reported via NativeException + ERR_PANIC.
+/// `command_fd` must be a valid Android-owned socket fd (>= 0). Rust borrows
+/// and dups it immediately, then stores the OwnedFd. The Kotlin caller closes
+/// `command_fd` after this function returns. Returns the session id (> 0) on
+/// success, or a negative ERR_* sentinel on expected failure. Panics are caught
+/// and reported via NativeException + ERR_PANIC.
 ///
 /// `endpoint_metadata` is accepted for future use (parsed by fuji-ptpip once
 /// wired); currently unused in the stub.
@@ -718,8 +720,8 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
 /// `live_view_fd` is Android-owned and already dup'd by the caller. Rust dups
 /// it again immediately inside this function (via `BorrowedFd::try_clone_to_owned`),
 /// takes ownership of the dup, and passes the dup's raw fd to the async read
-/// loop via `TcpStream::from_raw_fd`. Android MUST NOT close or use
-/// `live_view_fd` after this call returns `OK`.
+/// loop via `TcpStream::from_raw_fd`. The Kotlin caller closes `live_view_fd`
+/// after this function returns and must not use it again.
 ///
 /// # JNI / thread safety
 /// `callback_obj` is registered as a global reference before spawning the worker

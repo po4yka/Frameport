@@ -24,10 +24,11 @@ import javax.inject.Inject
  * frame is delivered.
  *
  * fd ownership contract for [liveViewFd]:
- * The caller must pass an Android-owned, dup'd raw socket fd already bound to the
+ * The caller must pass an Android-owned, detached raw socket fd already bound to the
  * camera network and connected to port 55742 (LIVEVIEW_CHANNEL_PORT = 0xD9BE,
- * master-constants.md §1). Ownership transfers to the Rust layer when the flow is
- * collected. Android MUST NOT close or use this fd after starting collection.
+ * master-constants.md §1). The native bridge borrows and dups it when the flow is
+ * collected; the camera data adapter closes the detached fd after the start call
+ * returns. Callers MUST NOT close or use this fd after starting collection.
  * See docs/rust/fd-ownership.md and ADR-0002.
  *
  * Privacy: no fd values, IP addresses, session ids as raw device identifiers, or
@@ -48,8 +49,8 @@ class LiveViewUseCase
          * cancelling the collector stops it.
          *
          * @param sessionId Active PTP-IP session returned by [FujiNativeSdk.openWifiSession].
-         * @param liveViewFd Android-owned, dup'd fd for the live-view socket (port 55742).
-         *   Ownership transfers to Rust on collection. MUST NOT be used after this call.
+         * @param liveViewFd Detached fd for the live-view socket (port 55742).
+         *   Rust borrows and dups it on collection. MUST NOT be used after this call.
          * @return Cold [Flow<ByteArray>] of JPEG frames. Latest-frame-wins; frames may be dropped.
          */
         // cancel-safe: delegates to FujiNativeSdk.liveViewFrames which is a callbackFlow with

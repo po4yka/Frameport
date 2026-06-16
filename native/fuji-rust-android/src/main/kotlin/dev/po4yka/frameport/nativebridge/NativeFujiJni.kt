@@ -53,9 +53,9 @@ class NativeFujiJni private constructor() {
          * Start the Rust live-view read loop.
          *
          * fd ownership contract:
-         * [liveViewFd] is an Android-owned, dup'd raw socket fd. Rust dups it
-         * immediately and takes ownership of the dup. Android MUST NOT close or use
-         * [liveViewFd] after this call returns successfully.
+         * [liveViewFd] is an Android-owned, detached raw socket fd. Rust dups it
+         * immediately and takes ownership of the dup. The Java/Kotlin caller must
+         * close [liveViewFd] after this call returns and must not use it again.
          *
          * [callback] is registered as a JNI GlobalRef inside Rust. It is released
          * when [nativeLiveViewStop] completes or on panic.
@@ -64,7 +64,7 @@ class NativeFujiJni private constructor() {
          * on failure. On panic, throws [NativeException] and returns [ERR_PANIC].
          *
          * @param sessionId Active PTP-IP session id (> 0).
-         * @param liveViewFd Android-owned dup'd socket fd for port 55742. Ownership transfers to Rust.
+         * @param liveViewFd Detached socket fd for port 55742. Rust borrows and dups it.
          * @param callback Per-frame callback; called on the Rust worker thread (JVM daemon thread).
          */
         @JvmStatic

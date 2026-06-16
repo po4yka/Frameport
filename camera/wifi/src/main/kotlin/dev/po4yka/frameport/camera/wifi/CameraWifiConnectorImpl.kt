@@ -260,12 +260,12 @@ class CameraWifiConnectorImpl
 
                 // DUP AND OWN:
                 // ParcelFileDescriptor.fromSocket(socket) wraps the socket's fd; detachFd() creates
-                // an independent owned duplicate that the caller is responsible for closing.
+                // an independent duplicate that the caller must pass to the native bridge once.
                 //
                 // OWNERSHIP NOTE: Android retains the original 'socket' object (stored in activeSocket)
                 // to keep the Network binding alive until release(). The detached fd is an independent
-                // dup — Rust owns it exclusively and must close it via the JNI bridge on session end.
-                // Double-close is prevented because Android never closes this detached fd.
+                // dup. Rust borrows and dups it synchronously; the camera data adapter closes this
+                // detached fd after the native bridge returns. Rust closes only its own dup.
                 //
                 // See: docs/rust/fd-ownership.md, docs/adr/0002-wifi-socket-fd-handoff.md §Socket Rules
                 val ownedFd =
@@ -344,13 +344,14 @@ class CameraWifiConnectorImpl
 
                 // DUP AND OWN (identical discipline to openBoundSocket — M07 command-channel pattern):
                 // ParcelFileDescriptor.fromSocket(socket) wraps the socket's fd; detachFd() creates
-                // an independent owned duplicate transferred to the caller (Rust EventChannelReader).
-                // Android must NOT close this fd; Rust owns it exclusively and closes it via JNI bridge.
+                // an independent duplicate transferred to the caller for a native bridge call.
+                // Rust borrows and dups it synchronously; the camera data adapter closes this
+                // detached fd after the native bridge returns. Rust closes only its own dup.
                 // The underlying 'socket' object is closed below — Android does NOT retain the event socket
                 // because the event channel does not keep the Network binding alive (the command channel
                 // socket in activeSocket already does that).
                 //
-                // fd ownership: caller (Rust EventChannelReader) takes ownership; must close its copy.
+                // fd ownership: caller must pass the detached fd to the native bridge exactly once.
                 // See: docs/rust/fd-ownership.md, docs/adr/0002-wifi-socket-fd-handoff.md §Socket Rules
                 val ownedFd =
                     try {
@@ -431,14 +432,15 @@ class CameraWifiConnectorImpl
 
                 // DUP AND OWN (identical discipline to openEventSocket — M15 event-channel pattern):
                 // ParcelFileDescriptor.fromSocket(socket) wraps the socket's fd; detachFd() creates
-                // an independent owned duplicate transferred to the caller (Rust LiveViewParser read loop).
-                // Android must NOT close this fd; Rust owns it exclusively and closes it via JNI bridge
-                // when the live-view session stops.
+                // an independent duplicate transferred to the caller for a native bridge call.
+                // Rust borrows and dups it synchronously; the camera data adapter closes this
+                // detached fd after the native bridge returns. Rust closes only its own dup when the
+                // live-view session stops.
                 // The underlying 'socket' object is closed below — Android does NOT retain the live-view
                 // socket because it does not keep the Network binding alive (the command channel socket
                 // in activeSocket already does that).
                 //
-                // fd ownership: caller (Rust LiveViewParser read loop) takes ownership; must close its copy.
+                // fd ownership: caller must pass the detached fd to the native bridge exactly once.
                 // See: docs/rust/fd-ownership.md, docs/adr/0002-wifi-socket-fd-handoff.md §Socket Rules
                 val ownedFd =
                     try {

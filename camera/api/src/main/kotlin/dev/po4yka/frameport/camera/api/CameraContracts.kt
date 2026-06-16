@@ -100,8 +100,9 @@ sealed interface ImportState {
 /**
  * Adapter interface for the Rust native SDK, owned by :camera:data.
  *
- * fd ownership contract for [socketFd]: the caller must have dup'd the fd before passing it;
- * Rust takes ownership and closes its copy. The Android side closes its own original separately.
+ * fd ownership contract for [socketFd]: the caller passes a detached socket fd to the native
+ * bridge exactly once. Rust borrows and duplicates it synchronously; the Kotlin adapter closes
+ * the detached fd after the bridge call returns. Rust closes only its own dup.
  *
  * fd ownership contract for [outputFd] (see [downloadObjectToFd]):
  * [outputFd] is ANDROID-OWNED and BORROWED by Rust. Rust dups the fd internally and closes only
@@ -111,7 +112,8 @@ sealed interface ImportState {
  */
 interface FujiNativeSdk {
     /**
-     * @param socketFd Owned, dup'd raw fd bound to the camera network. Rust closes this fd when done.
+     * @param socketFd Detached raw fd bound to the camera network. The native bridge borrows
+     *   and dups it; the Kotlin adapter closes this fd after the bridge call returns.
      * @param endpointMetadata Camera host/port metadata for the PTP-IP session.
      */
     // cancel-safe: Rust session open is a single request/response; cancellation propagates via cooperative Kotlin cancellation around the blocking call in withContext.
@@ -162,11 +164,12 @@ interface FujiNativeSdk {
      * the most recent frame is guaranteed at any point.
      *
      * fd ownership contract:
-     * [liveViewFd] is an Android-owned, dup'd raw socket fd already bound to the
+     * [liveViewFd] is an Android-owned, detached raw socket fd already bound to the
      * camera network and connected to port 55742 (LIVEVIEW_CHANNEL_PORT,
-     * master-constants.md §1). Ownership transfers to Rust when [nativeLiveViewStart]
-     * is called inside this flow. Rust closes its copy when the session stops.
-     * Android MUST NOT close or use this fd after passing it here.
+     * master-constants.md §1). The native bridge borrows and dups it when
+     * [nativeLiveViewStart] is called inside this flow; the Kotlin adapter closes this
+     * detached fd after the start call returns. Rust closes only its dup when stopped.
+     * Callers MUST NOT close or use this fd after passing it here.
      * See docs/rust/fd-ownership.md and ADR-0002.
      *
      * Lifecycle:
@@ -175,7 +178,7 @@ interface FujiNativeSdk {
      * Rust read loop.
      *
      * @param sessionId Active PTP-IP session.
-     * @param liveViewFd Android-owned, dup'd fd for the live-view socket (port 55742).
+     * @param liveViewFd Detached fd for the live-view socket (port 55742).
      * @return Cold [Flow<ByteArray>] of JPEG frames. Latest-frame-wins; frames may be dropped.
      */
     // cancel-safe: callbackFlow with awaitClose; cancellation triggers awaitClose block

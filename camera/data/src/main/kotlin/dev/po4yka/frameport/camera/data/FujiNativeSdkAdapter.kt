@@ -1,7 +1,9 @@
 package dev.po4yka.frameport.camera.data
 
+import android.os.ParcelFileDescriptor
 import dev.po4yka.frameport.camera.api.CameraMediaObject
 import dev.po4yka.frameport.camera.api.CameraObjectHandle
+import dev.po4yka.frameport.camera.api.CameraWifiConnector
 import dev.po4yka.frameport.camera.api.EndpointMetadata
 import dev.po4yka.frameport.camera.api.FujiNativeSdk
 import dev.po4yka.frameport.camera.api.SessionId
@@ -46,6 +48,10 @@ import javax.inject.Singleton
  * fd ownership for [downloadObjectToFd]: [outputFd] is ANDROID-OWNED and BORROWED by Rust.
  * Rust dups the fd internally and closes only its own dup. Android must NOT call detachFd()
  * and must close the original ParcelFileDescriptor after the transfer terminates.
+ *
+ * fd ownership for Wi-Fi/live-view sockets: [CameraWifiConnector] returns detached socket fds
+ * that this adapter passes to JNI. Rust borrows and dups each fd synchronously; this adapter
+ * closes the detached Android fd after the JNI call returns. Rust closes only its own dup.
  * See docs/rust/fd-ownership.md and ADR-0002.
  */
 @Singleton
@@ -62,10 +68,14 @@ class FujiNativeSdkAdapter
         ): Result<SessionId> =
             withContext(ioDispatcher) {
                 val metaJson = """{"host":"${endpointMetadata.host}","port":${endpointMetadata.port}}"""
-                nativeFujiSdk
-                    .openWifiSession(socketFd, metaJson)
-                    .map { session -> SessionId(session.id) }
-                    .toTypedFailure()
+                try {
+                    nativeFujiSdk
+                        .openWifiSession(socketFd, metaJson)
+                        .map { session -> SessionId(session.id) }
+                        .toTypedFailure()
+                } finally {
+                    closeDetachedFd(socketFd)
+                }
             }
 
         // cancel-safe: single withContext; best-effort cleanup; no shared state after cancellation.
@@ -143,10 +153,10 @@ class FujiNativeSdkAdapter
         // is never blocked on a slow Compose consumer. Callers must not assume every frame
         // is delivered — only the most recent frame is guaranteed at any point.
         //
-        // fd ownership: liveViewFd is Android-owned and already dup'd by the caller (via
-        // CameraWifiConnector.openLiveViewSocket). Rust dups it again inside nativeLiveViewStart
-        // and takes exclusive ownership of the dup. Android MUST NOT close liveViewFd after
-        // this flow is collected. See docs/rust/fd-ownership.md and ADR-0002.
+        // fd ownership: liveViewFd is Android-owned and already detached by the caller (via
+        // CameraWifiConnector.openLiveViewSocket). Rust borrows and dups it inside
+        // nativeLiveViewStart; this adapter closes liveViewFd after the start call returns.
+        // Rust closes only its dup when the live-view session stops.
         override fun liveViewFrames(
             sessionId: SessionId,
             liveViewFd: Int,
@@ -168,8 +178,14 @@ class FujiNativeSdkAdapter
                         Unit
                     }
 
-                // Start the Rust read loop. On success, the worker thread is running.
-                val startResult = nativeFujiSdk.nativeLiveViewStart(sessionId.value, liveViewFd, callback)
+                // Start the Rust read loop. On success, the worker thread is running and owns
+                // only Rust's dup. Always close the detached Android fd after the call returns.
+                val startResult =
+                    try {
+                        nativeFujiSdk.nativeLiveViewStart(sessionId.value, liveViewFd, callback)
+                    } finally {
+                        closeDetachedFd(liveViewFd)
+                    }
                 if (startResult.isFailure) {
                     close(startResult.exceptionOrNull() ?: IllegalStateException("nativeLiveViewStart failed"))
                     return@callbackFlow
@@ -232,4 +248,9 @@ class FujiNativeSdkAdapter
          */
         private fun <T> Result<T>.toTypedFailure(): Result<T> =
             recoverCatching { throwable -> throw FrameportException(throwable.toRedactedFrameportError()) }
+
+        private fun closeDetachedFd(fd: Int) {
+            if (fd < 0) return
+            runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
+        }
     }

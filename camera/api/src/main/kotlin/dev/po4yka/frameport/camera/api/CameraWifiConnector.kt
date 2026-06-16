@@ -9,7 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
  * network binding, socket connection, and file descriptor handoff.
  *
  * Does NOT own: PTP-IP framing, session state, media enumeration, or any protocol logic.
- * Those belong to the Rust layer (fuji-rs) after receiving an [OwnedSocketHandle].
+ * Those belong to the Rust layer (fuji-rs) after the native bridge borrows and
+ * duplicates an [OwnedSocketHandle].
  *
  * See: docs/adr/0002-wifi-socket-fd-handoff.md, docs/android/wifi-network-routing.md
  */
@@ -37,9 +38,10 @@ interface CameraWifiConnector {
      * in live-view mode via SetFunctionMode (FunctionMode = 22 = IMAGE_LIVE_VIEW).
      *
      * fd ownership contract (identical to [openBoundSocket] / [openEventSocket]):
-     * The returned [OwnedSocketHandle.fd] is a dup of the underlying socket fd.
-     * Ownership transfers to the CALLER (Rust layer). Android has already closed its
-     * own socket reference separately. Rust closes its dup when done.
+     * The returned [OwnedSocketHandle.fd] is a detached dup of the underlying socket fd.
+     * The caller must pass it to the native bridge exactly once. The native bridge
+     * borrows and duplicates it synchronously; the Kotlin adapter then closes this
+     * detached fd. Rust closes only its own dup when done.
      * See docs/rust/fd-ownership.md and ADR-0002.
      *
      * TCP socket config: TCP_NODELAY = true, SO_KEEPALIVE = true, 1 s connect timeout.
@@ -65,9 +67,10 @@ interface CameraWifiConnector {
      * start listening on that port.
      *
      * fd ownership contract (identical to [openBoundSocket] / M07 command-channel pattern):
-     * The returned [OwnedSocketHandle.fd] is a dup of the underlying socket fd.
-     * Ownership transfers to the CALLER (Rust layer). The Android side has already
-     * closed its own socket reference separately. Rust closes its dup when done.
+     * The returned [OwnedSocketHandle.fd] is a detached dup of the underlying socket fd.
+     * The caller must pass it to the native bridge exactly once. The native bridge
+     * borrows and duplicates it synchronously; the Kotlin adapter then closes this
+     * detached fd. Rust closes only its own dup when done.
      * See docs/rust/fd-ownership.md and ADR-0002.
      *
      * TCP socket config: TCP_NODELAY = true, SO_KEEPALIVE = true, 1 s connect timeout.
@@ -245,14 +248,14 @@ value class CameraNetworkHandle(
 )
 
 /**
- * An owned, duplicated raw file descriptor suitable for passing to the Rust layer.
+ * A detached raw socket file descriptor suitable for one native bridge call.
  *
  * Ownership semantics (CRITICAL — see docs/rust/fd-ownership.md and ADR-0002):
- * Ownership of this duplicated file descriptor transfers to the CALLER. Rust
- * takes ownership when passed to NativeFujiSdk.openWifiSession(...) and is responsible for
- * closing it via the JNI bridge. The Android side has already closed/retained its OWN socket
- * separately; this fd is an independent dup. Double-close is prevented because Android never
- * closes this duplicate.
+ * This fd is an independent dup of an Android-created socket. The caller owns it
+ * only until it is passed to the native bridge. Rust borrows and duplicates it
+ * synchronously; the Kotlin adapter closes this detached fd after the bridge call
+ * returns. Rust closes only its own dup. Do not close or reuse [fd] after passing it
+ * to NativeFujiSdk.openWifiSession(...) or live-view start.
  *
  * The [fd] value is the raw int fd. A value of -1 indicates an invalid/unset state (e.g. in tests).
  */

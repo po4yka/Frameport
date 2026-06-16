@@ -34,9 +34,9 @@ import javax.inject.Singleton
  * - ViewModels and Composables MUST NOT call startForegroundService / stopService directly.
  *
  * fd ownership: [CameraWifiConnector.openBoundSocket] produces an [OwnedSocketHandle] whose fd
- * has already been dup'd by the Android side. Ownership of that fd transfers to
- * [FujiNativeSdk.openWifiSession]; Rust closes its copy. The Android socket is managed separately
- * by [CameraWifiConnector]. See docs/rust/fd-ownership.md and ADR-0002.
+ * has already been detached by the Android side. [FujiNativeSdk.openWifiSession] borrows and
+ * duplicates that fd via the native bridge; the camera data adapter closes the detached fd after
+ * the bridge call returns. Rust closes only its own dup. See docs/rust/fd-ownership.md and ADR-0002.
  *
  * TODO(M09): Wire the real fd-handoff path — requestCameraNetwork -> openBoundSocket ->
  *   OwnedSocketHandle.fd -> fujiNativeSdk.openWifiSession. Currently stubbed with a placeholder

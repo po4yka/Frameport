@@ -32,6 +32,15 @@ interface NativeFujiSdk {
 
     fun closeSession(session: NativeCameraSession): Result<Unit>
 
+    /**
+     * Open a Wi-Fi PTP-IP session using [commandFd].
+     *
+     * fd ownership contract:
+     * [commandFd] is a detached Android socket fd. Rust borrows and dups it during
+     * this call, then owns only the dup. The caller is responsible for closing
+     * [commandFd] after this call returns; the higher-level camera data adapter
+     * does that for production callers.
+     */
     fun openWifiSession(
         commandFd: Int,
         endpointMetadata: String,
@@ -70,11 +79,11 @@ interface NativeFujiSdk {
      * Start the Rust live-view read loop for [sessionId] over [liveViewFd].
      *
      * fd ownership contract:
-     * [liveViewFd] is an Android-owned, dup'd raw socket fd already bound to the
+     * [liveViewFd] is an Android-owned, detached raw socket fd already bound to the
      * camera network and connected to port 55742 (LIVEVIEW_CHANNEL_PORT = 0xD9BE,
      * master-constants.md §1). Rust dups it immediately inside [nativeLiveViewStart]
-     * and takes ownership of the dup. Android MUST NOT close or use this fd after
-     * calling this method.
+     * and takes ownership of the dup. The caller must close [liveViewFd] after this
+     * call returns; the higher-level camera data adapter does that for production callers.
      *
      * [callback] is registered as a JNI GlobalRef inside the Rust worker. The
      * GlobalRef is released when [nativeLiveViewStop] completes or on panic.
@@ -85,7 +94,7 @@ interface NativeFujiSdk {
      * thread boundaries — see jni-error-mapping.md.
      *
      * @param sessionId Session id returned by [openWifiSession].
-     * @param liveViewFd Android-owned, dup'd fd for port 55742. Ownership transfers to Rust.
+     * @param liveViewFd Detached fd for port 55742. Rust borrows and dups it.
      * @param callback Receives each parsed JPEG frame on the Rust worker thread.
      * @return [Result.success] if the worker started; [Result.failure] on native error.
      */
