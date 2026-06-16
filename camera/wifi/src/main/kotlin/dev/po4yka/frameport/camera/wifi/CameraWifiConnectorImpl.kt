@@ -193,9 +193,17 @@ class CameraWifiConnectorImpl
                 safeUnregisterCallback()
                 released.set(false)
                 activeCallback = networkCallback
-                connectivityManager.requestNetwork(request, networkCallback)
-
-                deferred.await()
+                var keepCallback = false
+                try {
+                    connectivityManager.requestNetwork(request, networkCallback)
+                    val result = deferred.await()
+                    keepCallback = result.isSuccess
+                    result
+                } finally {
+                    if (!keepCallback) {
+                        safeUnregisterCallback()
+                    }
+                }
             }
 
         // cancel-safe: socket creation and connect are synchronous within withContext; cancellation closes the scope cleanly.
