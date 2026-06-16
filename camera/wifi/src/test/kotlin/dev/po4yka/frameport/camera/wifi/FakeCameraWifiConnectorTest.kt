@@ -63,6 +63,22 @@ class FakeCameraWifiConnectorTest {
             }
         }
 
+    @Test
+    fun `requestCameraNetwork stores full credentials including bssid`() =
+        runTest(UnconfinedTestDispatcher()) {
+            val credentials =
+                CameraWifiCredentials(
+                    ssid = "FUJIFILM-XTF",
+                    passphrase = "secret",
+                    bssid = "AA:BB:CC:DD:EE:FF",
+                )
+
+            val result = fake.requestCameraNetwork(credentials)
+
+            assertTrue(result.isSuccess)
+            assertEquals(credentials, fake.lastRequestedCredentials)
+        }
+
     /**
      * User-rejection: arming UserRejectedNetworkRequest before requestCameraNetwork causes the
      * terminal state Error(UserRejectedNetworkRequest) to be emitted.

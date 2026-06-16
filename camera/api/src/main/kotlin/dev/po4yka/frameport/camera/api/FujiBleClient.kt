@@ -102,6 +102,7 @@ enum class BleConnectionState {
 data class BleWifiHandoff(
     val ssid: String,
     val passphrase: String,
+    val bssid: String,
 )
 
 /**

@@ -79,6 +79,15 @@ internal object FujiCharacteristicIds {
      * PRIVACY: the value read from this characteristic must NEVER be logged at any level.
      */
     val WIFI_PASSPHRASE = CharacteristicId("e809256a-915c-4967-92e8-53b7d4cad213")
+
+    /**
+     * Characteristic that carries the camera Wi-Fi MAC address used as BSSID.
+     * Source: docs/reference/ble-wifi-discovery.md — CHR_CAMERA_MAC_ADDRESS
+     * (SERVICE_CAMERA_INFORMATION). Required for precise AP targeting.
+     *
+     * PRIVACY: the value read from this characteristic must be redacted before diagnostics.
+     */
+    val WIFI_BSSID = CharacteristicId("49a12959-dfaa-4eb2-89ce-62548ad948f3")
 }
 
 /**
@@ -87,9 +96,9 @@ internal object FujiCharacteristicIds {
  * Responsibilities:
  * 1. Observes [FujiBleClient.scan] until a camera advertisement is found.
  * 2. Connects to the camera over GATT.
- * 3. Reads the SSID and passphrase characteristics.
- * 4. Validates the result as a [BleWifiHandoff] (non-empty SSID, non-empty passphrase).
- * 5. Calls [CameraWifiConnector.requestCameraNetwork] to join the camera Wi-Fi network.
+ * 3. Reads the SSID, passphrase, and BSSID characteristics.
+ * 4. Validates the result as a [BleWifiHandoff] (non-empty SSID/passphrase, valid BSSID).
+ * 5. Calls [CameraWifiConnector.requestCameraNetwork] to join the exact camera Wi-Fi network.
  * 6. Emits typed [BleHandoffState] transitions throughout.
  *
  * Boundary enforcement:
@@ -182,14 +191,31 @@ class BleAssistedConnectUseCase
                     return@flow
                 }
 
-                // Step 5 — Validate as BleWifiHandoff (mirrors Rust-layer validation contract).
-                val handoff = BleWifiHandoff(ssid = ssid, passphrase = passphrase)
+                // Step 5 — Read and validate the camera Wi-Fi MAC address for BSSID targeting.
+                val bssidResult = fujiBleClient.read(FujiCharacteristicIds.WIFI_BSSID)
+                if (bssidResult.isFailure) {
+                    emit(BleHandoffState.Failed("BSSID characteristic read failed."))
+                    return@flow
+                }
+                val bssid = bssidResult.getOrThrow().decodeBssidOrNull()
+                if (bssid == null) {
+                    emit(BleHandoffState.Failed("BSSID characteristic returned malformed value."))
+                    return@flow
+                }
+
+                // Step 6 — Validate as BleWifiHandoff (mirrors Rust-layer validation contract).
+                val handoff = BleWifiHandoff(ssid = ssid, passphrase = passphrase, bssid = bssid)
 
                 // PRIVACY: log only the SSID length as a diagnostic proxy — never the value itself.
                 emit(BleHandoffState.RequestingNetwork(ssid = handoff.ssid))
 
-                // Step 6 — Request the camera Wi-Fi network via Android.
-                val credentials = CameraWifiCredentials(ssid = handoff.ssid, passphrase = handoff.passphrase)
+                // Step 7 — Request the exact camera Wi-Fi network via Android.
+                val credentials =
+                    CameraWifiCredentials(
+                        ssid = handoff.ssid,
+                        passphrase = handoff.passphrase,
+                        bssid = handoff.bssid,
+                    )
                 val networkResult = cameraWifiConnector.requestCameraNetwork(credentials)
                 if (networkResult.isFailure) {
                     val diagnostic = networkResult.exceptionOrNull()?.message ?: "requestCameraNetwork failed"
@@ -238,6 +264,16 @@ private fun ByteArray.decodeToStringOrNull(): String? =
     } catch (_: Exception) {
         null
     }
+
+private fun ByteArray.decodeBssidOrNull(): String? {
+    if (size == 6) {
+        return joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xFF) }
+    }
+    val text = decodeToStringOrNull()?.trim()?.replace('-', ':') ?: return null
+    return if (text.matches(MAC_ADDRESS_REGEX)) text.uppercase() else null
+}
+
+private val MAC_ADDRESS_REGEX = Regex("[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
 
 /**
  * Strips any substring that could be an IP address, MAC address, or hex-run from a

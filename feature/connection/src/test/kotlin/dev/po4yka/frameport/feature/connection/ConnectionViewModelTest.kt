@@ -387,6 +387,9 @@ class ConnectionViewModelTest {
                     // PRIVACY: synthetic value only — never a real credential
                     characteristicValues["e809256a-915c-4967-92e8-53b7d4cad213"] =
                         BLE_TEST_PASSPHRASE.toByteArray(Charsets.UTF_8)
+                    // Camera MAC characteristic UUID — used as WifiNetworkSpecifier BSSID.
+                    characteristicValues["49a12959-dfaa-4eb2-89ce-62548ad948f3"] =
+                        BLE_TEST_MAC.toByteArray(Charsets.UTF_8)
                 }
             val vm = buildViewModel(bleClient)
 
@@ -476,6 +479,8 @@ class ConnectionViewModelTest {
                         BLE_TEST_SSID.toByteArray(Charsets.UTF_8)
                     characteristicValues["e809256a-915c-4967-92e8-53b7d4cad213"] =
                         BLE_TEST_PASSPHRASE.toByteArray(Charsets.UTF_8)
+                    characteristicValues["49a12959-dfaa-4eb2-89ce-62548ad948f3"] =
+                        BLE_TEST_MAC.toByteArray(Charsets.UTF_8)
                 }
             val vm = buildViewModel(bleClient)
             val recordingTree = RecordingTimberTree()

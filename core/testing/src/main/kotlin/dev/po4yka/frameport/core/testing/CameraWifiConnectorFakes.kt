@@ -40,6 +40,10 @@ class FakeCameraWifiConnector : CameraWifiConnector {
     /** Fake fd used in happy-path responses. -1 is invalid/sentinel; tests can override via [armFd]. */
     private var armedFd: Int = FAKE_FD
 
+    /** Last credentials passed to [requestCameraNetwork], retained for assertions. */
+    var lastRequestedCredentials: CameraWifiCredentials? = null
+        private set
+
     /** When non-null, the next interface call will emit Error(armedError) instead of success states. */
     @Volatile private var armedError: CameraWifiError? = null
 
@@ -47,6 +51,7 @@ class FakeCameraWifiConnector : CameraWifiConnector {
 
     // cancel-safe: no real suspension; state transitions are immediate.
     override suspend fun requestCameraNetwork(credentials: CameraWifiCredentials): Result<CameraNetworkHandle> {
+        lastRequestedCredentials = credentials
         val error = armedError
         if (error != null) {
             armedError = null
@@ -146,6 +151,7 @@ class FakeCameraWifiConnector : CameraWifiConnector {
     fun reset() {
         armedError = null
         armedFd = FAKE_FD
+        lastRequestedCredentials = null
         releasedOnce.set(false)
         _state.value = CameraWifiState.Idle
     }

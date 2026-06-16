@@ -2,6 +2,7 @@ package dev.po4yka.frameport.camera.wifi
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.MacAddress
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -134,12 +135,22 @@ class CameraWifiConnectorImpl
 
                 val deferred = CompletableDeferred<Result<CameraNetworkHandle>>()
 
-                // Capture passphrase in a local val for smart-cast across the module boundary.
+                // Capture nullable credential fields locally for smart-cast across module boundaries.
                 val passphrase = credentials.passphrase
-                val specifierBuilder =
-                    WifiNetworkSpecifier
-                        .Builder()
-                        .setSsid(credentials.ssid)
+                val bssid = credentials.bssid
+                val specifierBuilder = WifiNetworkSpecifier.Builder().setSsid(credentials.ssid)
+                if (bssid != null) {
+                    val macAddress =
+                        try {
+                            MacAddress.fromString(bssid)
+                        } catch (_: IllegalArgumentException) {
+                            val detail = "Invalid camera BSSID"
+                            Timber.tag(TAG).d("requestCameraNetwork: SocketBindFailed (%s)", detail)
+                            _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
+                            return@withContext Result.failure(IllegalArgumentException(detail))
+                        }
+                    specifierBuilder.setBssid(macAddress)
+                }
                 val specifier =
                     if (passphrase != null) {
                         specifierBuilder.setWpa2Passphrase(passphrase).build()

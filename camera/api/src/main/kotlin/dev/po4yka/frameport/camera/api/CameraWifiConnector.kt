@@ -218,11 +218,17 @@ sealed class CameraWifiError {
 
 /**
  * Credentials needed to connect to the camera Wi-Fi access point.
- * PRIVACY: passphrase must never be logged. See privacy-local-first.md.
+ *
+ * [bssid] is the camera AP MAC address in canonical uppercase colon-separated form
+ * (`AA:BB:CC:DD:EE:FF`). It should be supplied when obtained from BLE handoff so
+ * Android targets the specific camera AP, not just any network with the same SSID.
+ *
+ * PRIVACY: passphrase and BSSID must never be logged. See privacy-local-first.md.
  */
 data class CameraWifiCredentials(
     val ssid: String,
     val passphrase: String?,
+    val bssid: String? = null,
 )
 
 /**
