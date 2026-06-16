@@ -860,25 +860,28 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                         // on_frame: called synchronously for each parsed JPEG frame.
                         // Allocates a JVM byte[] (unavoidable JNI marshaling cost;
                         // excluded from the Rust zero-alloc constraint per spec).
+                        // The explicit local frame prevents per-frame byte[] local
+                        // references from accumulating on Android's small JNI local
+                        // reference table during sustained live view.
                         // No logging on the hot path per privacy-local-first.md and
                         // the per-frame-no-log constraint.
                         let on_frame = |jpeg: &[u8]| {
-                            // Allocate JVM byte[] from the JPEG slice.
-                            let byte_arr = match jni_env.byte_array_from_slice(jpeg) {
-                                Ok(arr) => arr,
-                                Err(_) => return,
-                            };
-                            // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
-                            let _ = jni_env.call_method(
-                                callback_global.as_obj(),
-                                "onLiveViewFrame",
-                                "([B)V",
-                                &[JValue::Object(&byte_arr)],
-                            );
-                            // Clear any pending exception so the next frame can proceed.
-                            if jni_env.exception_check().unwrap_or(false) {
-                                let _ = jni_env.exception_clear();
-                            }
+                            let _: jni::errors::Result<()> = jni_env.with_local_frame(16, |env| {
+                                // Allocate JVM byte[] from the JPEG slice.
+                                let byte_arr = env.byte_array_from_slice(jpeg)?;
+                                // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
+                                let _ = env.call_method(
+                                    callback_global.as_obj(),
+                                    "onLiveViewFrame",
+                                    "([B)V",
+                                    &[JValue::Object(&byte_arr)],
+                                );
+                                // Clear any pending exception so the next frame can proceed.
+                                if env.exception_check().unwrap_or(false) {
+                                    let _ = env.exception_clear();
+                                }
+                                Ok(())
+                            });
                         };
 
                         // run_liveview_loop is cancel-safe (see fuji-liveview doc).
