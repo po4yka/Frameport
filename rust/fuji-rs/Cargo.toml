@@ -30,7 +30,7 @@ fuji-ble-protocol = { path = "crates/fuji-ble-protocol" }
 fuji-usb-ptp = { path = "crates/fuji-usb-ptp" }
 fuji-diagnostics = { path = "crates/fuji-diagnostics" }
 fuji-sim = { path = "crates/fuji-sim" }
-jni = "0.21"
+jni = "0.22.4"
 libc = "0.2"
 thiserror = "2"
 tokio = { version = "1" }
