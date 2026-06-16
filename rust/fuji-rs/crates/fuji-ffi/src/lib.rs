@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,10 @@ static TRANSFERS: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
 struct LiveViewHandle {
     /// Set to true to signal the worker read loop to exit cleanly.
     stop_flag: Arc<AtomicBool>,
+    /// Duplicate of the live-view socket fd retained only to wake blocked reads
+    /// during stop/shutdown. Dropping it closes this duplicate; the worker owns
+    /// and closes the independent fd used by its TcpStream.
+    wake_fd: OwnedFd,
     /// Join handle for the dedicated worker std::thread.
     /// Wrapped in Option so we can take() it in stop to join without consuming self.
     worker: Option<std::thread::JoinHandle<()>>,
@@ -109,6 +113,7 @@ pub fn native_shutdown() -> i32 {
                 // eventual visibility — a few extra iterations before observing
                 // the flag on a weakly-ordered CPU are acceptable.
                 handle.stop_flag.store(true, Ordering::Relaxed);
+                wake_liveview_reader(&handle.wake_fd);
             }
             // Collect keys first to avoid holding the guard while joining.
             let keys: Vec<i64> = lv.keys().copied().collect();
@@ -116,6 +121,7 @@ pub fn native_shutdown() -> i32 {
                 if let Some(mut handle) = lv.remove(&key)
                     && let Some(jh) = handle.worker.take()
                 {
+                    wake_liveview_reader(&handle.wake_fd);
                     let _ = jh.join();
                 }
             }
@@ -717,6 +723,16 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                 Ok(fd) => fd,
                 Err(_) => return ERR_PANIC,
             };
+        // Keep a separate fd duplicate for stop/shutdown. `shutdown(SHUT_RDWR)`
+        // on this duplicate wakes any blocked read on the worker's socket fd,
+        // allowing the stop flag to be observed before `join()`.
+        // SAFETY: owned_fd is a live socket fd owned by this function. The
+        // borrowed fd is used only for this immediate dup and is not retained.
+        let wake_fd: OwnedFd =
+            match unsafe { BorrowedFd::borrow_raw(owned_fd.as_raw_fd()) }.try_clone_to_owned() {
+                Ok(fd) => fd,
+                Err(_) => return ERR_PANIC,
+            };
 
         // ── Register callback as a GlobalRef ──────────────────────────────────
         // GlobalRef is Send; it can be moved into the worker thread.
@@ -928,6 +944,7 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                     session_id,
                     LiveViewHandle {
                         stop_flag,
+                        wake_fd,
                         worker: Some(join_handle),
                     },
                 );
@@ -943,6 +960,7 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                 // an orphaned thread that leaks the fd and the GlobalRef for
                 // the process lifetime.
                 stop_flag.store(true, Ordering::SeqCst);
+                wake_liveview_reader(&wake_fd);
                 // join() returns Err only if the thread panicked; either way
                 // the thread has exited and released its resources.
                 let _ = join_handle.join();
@@ -1001,6 +1019,7 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
         // eventual visibility — extra loop iterations on weakly-ordered CPUs
         // before observing the flag are acceptable for a stop signal.
         handle.stop_flag.store(true, Ordering::Relaxed);
+        wake_liveview_reader(&handle.wake_fd);
 
         // Join the worker thread; this waits for the read loop to drain and exit.
         // The GlobalRef inside the worker is dropped when the async block exits.
@@ -1108,6 +1127,25 @@ unsafe fn libc_close(fd: i32) {
     let _ = unsafe { close(fd) };
 }
 
+/// Wake the live-view worker if it is blocked in a socket read.
+///
+/// The fd is a duplicate of the same socket description used by the worker's
+/// TcpStream. `shutdown(SHUT_RDWR)` interrupts blocking reads on all duplicates
+/// of that socket; dropping `wake_fd` later closes only this duplicate.
+#[inline]
+fn wake_liveview_reader(wake_fd: &OwnedFd) {
+    const SHUT_RDWR: i32 = 2;
+
+    unsafe extern "C" {
+        fn shutdown(fd: i32, how: i32) -> i32;
+    }
+
+    // SAFETY: wake_fd is a live socket fd duplicate owned by LiveViewHandle.
+    // shutdown() may fail if the worker already closed the socket; stop remains
+    // idempotent and the error is intentionally ignored before join().
+    let _ = unsafe { shutdown(wake_fd.as_raw_fd(), SHUT_RDWR) };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1129,6 +1167,33 @@ mod tests {
         WIFI_SESSIONS.lock().unwrap().clear();
         USB_SESSIONS.lock().unwrap().clear();
         TRANSFERS.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn wake_liveview_reader_shuts_down_socket_duplicate() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let (mut reader, _writer) = UnixStream::pair().expect("create socket pair");
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+        // SAFETY: reader.as_raw_fd() is a live socket fd for the duration of this
+        // immediate dup. The returned OwnedFd is independent of reader.
+        let wake_fd = unsafe { BorrowedFd::borrow_raw(reader.as_raw_fd()) }
+            .try_clone_to_owned()
+            .expect("dup reader fd");
+
+        let read_thread = std::thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            reader.read(&mut byte)
+        });
+
+        wake_liveview_reader(&wake_fd);
+
+        let read_result = read_thread.join().expect("reader thread should not panic");
+        assert_eq!(read_result.expect("read should complete"), 0);
     }
 
     // ----- existing tests (unchanged logic, now serialised via TEST_MUTEX) -----
