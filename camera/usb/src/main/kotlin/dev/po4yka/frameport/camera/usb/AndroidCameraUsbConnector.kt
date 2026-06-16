@@ -167,7 +167,7 @@ class AndroidCameraUsbConnector
             // then reconnected the device), which prevents clean teardown of subsequent sessions.
             closedOnce.set(false)
 
-            Timber.tag(TAG).d("handleAttached: device detected key=%s", deviceKey)
+            Timber.tag(TAG).d("handleAttached: device detected")
             _state.value = UsbSessionState.DeviceDetected(ref)
         }
 
@@ -185,7 +185,7 @@ class AndroidCameraUsbConnector
             val deviceKey = "${device.vendorId}:${device.productId}:${device.deviceId}"
             detectedDevices.remove(deviceKey)
 
-            Timber.tag(TAG).d("handleDetached: key=%s, currentState=%s", deviceKey, _state.value::class.simpleName)
+            Timber.tag(TAG).d("handleDetached: currentState=%s", _state.value::class.simpleName)
 
             // Handle detach at every lifecycle phase per GT-ANDROID.
             when (val currentState = _state.value) {
@@ -228,6 +228,12 @@ class AndroidCameraUsbConnector
         }
 
         private fun handlePermissionResult(intent: Intent) {
+            val device = intent.usbDeviceOrNull() ?: return
+            val pending = pendingPermissionDevice ?: return
+            if (!sameDevice(device, pending)) {
+                Timber.tag(TAG).d("handlePermissionResult: ignoring stale permission result")
+                return
+            }
             val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
             Timber.tag(TAG).d("handlePermissionResult: granted=%b", granted)
             permissionDeferred?.complete(granted)
@@ -249,14 +255,14 @@ class AndroidCameraUsbConnector
             withContext(ioDispatcher) {
                 val usbDevice = detectedDevices[device.deviceKey]
                 if (usbDevice == null) {
-                    Timber.tag(TAG).d("requestPermission: device not found in registry key=%s", device.deviceKey)
+                    Timber.tag(TAG).d("requestPermission: device not found in registry")
                     _state.value =
                         UsbSessionState.Error(
                             error = UsbSessionError.OpenDeviceFailed,
                             message = "Device not found in registry — may have been detached",
                         )
                     return@withContext Result.failure(
-                        IllegalStateException("USB device not found for key: ${device.deviceKey}"),
+                        IllegalStateException("USB device not found in registry"),
                     )
                 }
 
@@ -285,7 +291,7 @@ class AndroidCameraUsbConnector
                 // Fast path: permission was already granted (re-checked after the deferred is
                 // registered so a synchronous grant that arrived in the window above is not lost).
                 if (usbManager.hasPermission(usbDevice)) {
-                    Timber.tag(TAG).d("requestPermission: already granted, key=%s", device.deviceKey)
+                    Timber.tag(TAG).d("requestPermission: already granted")
                     permissionDeferred = null
                     pendingPermissionDevice = null
                     _state.value = UsbSessionState.OpeningDevice
@@ -293,7 +299,7 @@ class AndroidCameraUsbConnector
                 }
 
                 _state.value = UsbSessionState.PermissionPending
-                Timber.tag(TAG).d("requestPermission: requesting permission, key=%s", device.deviceKey)
+                Timber.tag(TAG).d("requestPermission: requesting permission")
 
                 val permissionIntent =
                     android.app.PendingIntent.getBroadcast(
@@ -309,7 +315,17 @@ class AndroidCameraUsbConnector
                 // If the OEM delivered the broadcast synchronously within requestPermission(),
                 // deferred is already complete and await() returns immediately. Otherwise it
                 // suspends until handlePermissionResult() or handleDetached() completes it.
-                val granted = deferred.await()
+                val granted =
+                    try {
+                        deferred.await()
+                    } finally {
+                        if (permissionDeferred === deferred) {
+                            permissionDeferred = null
+                        }
+                        if (pendingPermissionDevice === usbDevice) {
+                            pendingPermissionDevice = null
+                        }
+                    }
 
                 if (!granted) {
                     // Check if it was detach (already set to Error) or explicit deny
@@ -345,7 +361,7 @@ class AndroidCameraUsbConnector
                 val usbDevice = detectedDevices[device.deviceKey]
                 if (usbDevice == null) {
                     val msg = "Device not found in registry — may have been detached"
-                    Timber.tag(TAG).d("openSession: %s key=%s", msg, device.deviceKey)
+                    Timber.tag(TAG).d("openSession: %s", msg)
                     _state.value = UsbSessionState.Error(error = UsbSessionError.OpenDeviceFailed, message = msg)
                     return@withContext Result.failure(IllegalStateException(msg))
                 }
@@ -358,7 +374,7 @@ class AndroidCameraUsbConnector
                 }
 
                 _state.value = UsbSessionState.OpeningDevice
-                Timber.tag(TAG).d("openSession: OpeningDevice key=%s", device.deviceKey)
+                Timber.tag(TAG).d("openSession: OpeningDevice")
 
                 val connection =
                     try {
@@ -405,7 +421,7 @@ class AndroidCameraUsbConnector
                     }
 
                 _state.value = UsbSessionState.FdHandoff
-                Timber.tag(TAG).d("openSession: FdHandoff dupFd=%d", dupFd)
+                Timber.tag(TAG).d("openSession: FdHandoff")
 
                 // Pass dup'd fd and descriptor bytes to Rust. Rust takes ownership of dupFd.
                 // Android retains activeConnection which holds the original fd.
@@ -501,4 +517,20 @@ class AndroidCameraUsbConnector
                 activeConnection = null
             }
         }
+
+        private fun Intent.usbDeviceOrNull(): UsbDevice? =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            }
+
+        private fun sameDevice(
+            left: UsbDevice,
+            right: UsbDevice,
+        ): Boolean =
+            left.vendorId == right.vendorId &&
+                left.productId == right.productId &&
+                left.deviceId == right.deviceId
     }

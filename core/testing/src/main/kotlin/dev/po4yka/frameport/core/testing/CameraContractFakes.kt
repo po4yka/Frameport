@@ -208,6 +208,9 @@ class FakeCameraRepository : CameraRepository {
     private var successSessionId: SessionId? = null
     private var failureError: FrameportError? = null
 
+    var openSessionCallCount = 0
+        private set
+
     val closedSessions = mutableListOf<SessionId>()
 
     fun simulateSuccess(sessionId: SessionId) {
@@ -224,10 +227,12 @@ class FakeCameraRepository : CameraRepository {
         _sessionState.value = CameraSessionState.Idle
         successSessionId = null
         failureError = null
+        openSessionCallCount = 0
     }
 
     // cancel-safe: no real suspension; transitions state immediately.
     override suspend fun openSession(credentials: CameraWifiCredentials): Result<SessionId> {
+        openSessionCallCount++
         val err = failureError
         if (err != null) {
             _sessionState.value = CameraSessionState.Failed(err)

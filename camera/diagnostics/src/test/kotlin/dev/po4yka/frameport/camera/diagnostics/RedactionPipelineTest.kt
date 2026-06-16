@@ -198,7 +198,7 @@ class RedactionPipelineTest {
     fun redactDiagnosticText_removesHighRiskDiagnosticValues() {
         val raw =
                 "camera 192.168.0.1 mac AA:BB:CC:DD:EE:FF serial=3AB12345 " +
-                "passphrase=hunter2 ssid=Home Camera WiFi; gps 41.7151, 44.8271 file /sdcard/DCIM/DSCF1234.RAF"
+                "passphrase=hunter2 ssid=Home Camera WiFi; gps 41.7151, 44.8271 file /sdcard/DCIM/DSCF1234.RAF fd=42 socketFd=99"
 
         val result = pipeline.redactDiagnosticText(raw)
 
@@ -210,6 +210,8 @@ class RedactionPipelineTest {
         assertFalse(result.contains("41.7151"))
         assertFalse(result.contains("44.8271"))
         assertFalse(result.contains("DSCF1234.RAF"))
+        assertFalse(result.contains("fd=42"))
+        assertFalse(result.contains("socketFd=99"))
         assertTrue(result.contains("<redacted-ip>"))
         assertTrue(result.contains("<redacted-mac>"))
         assertTrue(result.contains("<redacted-serial>"))
@@ -217,5 +219,6 @@ class RedactionPipelineTest {
         assertTrue(result.contains("<redacted-ssid>"))
         assertTrue(result.contains("<redacted-gps>"))
         assertTrue(result.contains("<redacted-filename>"))
+        assertTrue(result.contains("<redacted-fd>"))
     }
 }

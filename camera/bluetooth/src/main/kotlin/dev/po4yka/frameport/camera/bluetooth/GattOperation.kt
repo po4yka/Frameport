@@ -1,5 +1,6 @@
 package dev.po4yka.frameport.camera.bluetooth
 
+import dev.po4yka.frameport.camera.api.BleCameraRef
 import dev.po4yka.frameport.camera.api.CharacteristicId
 import kotlinx.coroutines.CompletableDeferred
 
@@ -10,7 +11,7 @@ import kotlinx.coroutines.CompletableDeferred
  * (success or failure). The actor processes exactly ONE operation at a time.
  *
  * Threading: All operations are dispatched from the actor coroutine — never called
- * concurrently on the underlying BluetoothGatt instance.
+ * concurrently on the underlying GATT implementation.
  */
 internal sealed class GattOperation {
     /**
@@ -18,6 +19,7 @@ internal sealed class GattOperation {
      * Completes with Unit on success, or an exception on failure.
      */
     data class Connect(
+        val camera: BleCameraRef,
         val deferred: CompletableDeferred<Unit>,
     ) : GattOperation()
 
@@ -45,7 +47,7 @@ internal sealed class GattOperation {
 
     /**
      * Enable (or disable) CCCD notifications for a characteristic.
-     * Must call BluetoothGatt.setCharacteristicNotification + write CCCD descriptor.
+     * Requests notification setup when the transport supports an explicit subscription step.
      * Completes with Unit on success.
      */
     data class SetNotify(

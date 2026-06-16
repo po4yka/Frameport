@@ -67,6 +67,27 @@ class BleAssistedConnectUseCaseTest {
             assertEquals(BleHandoffState.Failed("BSSID characteristic returned malformed value."), states.last())
             assertEquals(null, wifiConnector.lastRequestedCredentials)
         }
+
+    @Test
+    fun bleHandoffFailsBeforeNetworkRequestWhenSsidUtf8IsMalformed() =
+        runTest(dispatcher) {
+            val wifiConnector = FakeCameraWifiConnector()
+            val bleClient =
+                FakeFujiBleClient(
+                    values =
+                        mapOf(
+                            FujiCharacteristicIds.WIFI_SSID.value to byteArrayOf(0x46, 0x55, 0xC3.toByte(), 0x28),
+                            FujiCharacteristicIds.WIFI_PASSPHRASE.value to "synthetic-passphrase".toByteArray(),
+                            FujiCharacteristicIds.WIFI_BSSID.value to "AA:BB:CC:DD:EE:FF".toByteArray(),
+                        ),
+                )
+            val useCase = BleAssistedConnectUseCase(bleClient, wifiConnector, dispatcher)
+
+            val states = useCase().toList()
+
+            assertEquals(BleHandoffState.Failed("SSID characteristic returned empty or non-UTF-8 value."), states.last())
+            assertEquals(null, wifiConnector.lastRequestedCredentials)
+        }
 }
 
 private class FakeFujiBleClient(

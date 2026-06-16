@@ -131,7 +131,7 @@ class CameraWifiConnectorImpl
                 }
 
                 _state.value = CameraWifiState.RequestingNetwork
-                Timber.tag(TAG).d("requestCameraNetwork: RequestingNetwork (ssid.hash=%d)", credentials.ssid.hashCode())
+                Timber.tag(TAG).d("requestCameraNetwork: RequestingNetwork")
 
                 val deferred = CompletableDeferred<Result<CameraNetworkHandle>>()
 
@@ -224,7 +224,7 @@ class CameraWifiConnectorImpl
         ): Result<OwnedSocketHandle> =
             withContext(ioDispatcher) {
                 _state.value = CameraWifiState.BindingSocket
-                Timber.tag(TAG).d("openBoundSocket: BindingSocket -> %s:%d", endpoint.host, endpoint.port)
+                Timber.tag(TAG).d("openBoundSocket: BindingSocket -> host=[redacted]:%d", endpoint.port)
 
                 // Find the active Android Network matching the handle's network handle id.
                 val network = findNetwork(handle)
@@ -318,7 +318,7 @@ class CameraWifiConnectorImpl
                 Timber
                     .tag(
                         TAG,
-                    ).d("openEventSocket: EventSocketRequested -> %s:%d", eventEndpoint.host, eventEndpoint.port)
+                    ).d("openEventSocket: EventSocketRequested -> host=[redacted]:%d", eventEndpoint.port)
 
                 val network = findNetwork(handle)
                 if (network == null) {
@@ -530,7 +530,7 @@ class CameraWifiConnectorImpl
          */
         private fun findNetwork(handle: CameraNetworkHandle): Network? {
             val cached = activeNetwork
-            if (cached != null) return cached
+            if (cached != null && cached.networkHandle.toString() == handle.value) return cached
             // Fallback: scan allNetworks if cache was cleared unexpectedly (e.g. process restore).
             val targetId = handle.value.toLongOrNull() ?: return null
             return connectivityManager.allNetworks.firstOrNull { it.networkHandle == targetId }

@@ -15,6 +15,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.po4yka.frameport.camera.api.CameraProfileRepository
 import dev.po4yka.frameport.camera.api.RemoteCaptureError
 import dev.po4yka.frameport.camera.api.RemoteCaptureRequest
 import dev.po4yka.frameport.camera.api.RemoteCaptureState
@@ -97,22 +98,23 @@ sealed interface RemoteAction {
 /**
  * ViewModel for [RemoteScreen].
  *
- * Injects [RemoteCaptureUseCase] (from :camera:domain) — the ONLY dependency.
+ * Injects [RemoteCaptureUseCase] (from :camera:domain) and [CameraProfileRepository] for the
+ * current camera identity.
  * It NEVER references BluetoothGatt, JNI types, Android platform I/O, or any
  * :camera:data / :native:fuji-rust-android class directly.
  *
  * The ViewModel does no suspend I/O itself. All I/O is delegated to the use case
  * and collected in [viewModelScope] via [launchIn].
  *
- * Camera model: wired to null (stub) in M15; real identity read comes in M16 when
- * the PTP-IP session identity negotiation result is propagated here.
- * TODO(M16): accept cameraModel from CameraRepository.sessionState or a dedicated identity flow.
+ * Camera model: read from the current camera profile when available. Missing identity fails closed
+ * at the capability gate instead of using a hardcoded compatibility claim.
  */
 @HiltViewModel
 class RemoteViewModel
     @Inject
     constructor(
         private val remoteCaptureUseCase: RemoteCaptureUseCase,
+        private val cameraProfileRepository: CameraProfileRepository,
     ) : ViewModel() {
         private val _uiState = MutableStateFlow<RemoteShutterUiState>(RemoteShutterUiState.Idle)
 
@@ -140,20 +142,16 @@ class RemoteViewModel
         /**
          * Dispatch a BLE shutter action.
          *
-         * [cameraModel] is stubbed to "X-T5" in M15 so the capability gate passes in the
-         * single verified model. TODO(M16): replace with real camera identity from session state.
+         * [cameraModel] comes from the current camera profile when available.
+         * Missing identity fails closed instead of bypassing the capability gate with a hardcoded model.
          *
          * cancel-safe: the use case flow is collected in viewModelScope; ViewModel.onCleared()
          * cancels the scope, which cancels the collection. No state is leaked.
          */
         private fun dispatchBleShutter(action: ShutterAction) {
-            // Stub: camera model is hardcoded to the M15 primary target so the gate passes.
-            // TODO(M16): read from CameraRepository / session identity.
-            val cameraModel = "X-T5"
-
             remoteCaptureUseCase(
                 request = RemoteCaptureRequest.BleShutter(action),
-                cameraModel = cameraModel,
+                cameraModel = cameraProfileRepository.getProfileForCurrentCamera()?.cameraModel,
             ).onEach { captureState ->
                 _uiState.value = captureState.toUiState()
             }.catch { throwable ->

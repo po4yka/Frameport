@@ -107,6 +107,13 @@ class ConnectionViewModel
         }
 
         fun connect(ssid: String) {
+            val current = _uiState.value
+            if (current is ConnectionUiState.Connecting ||
+                current is ConnectionUiState.ConnectingViaBleHandoff ||
+                current is ConnectionUiState.Connected
+            ) {
+                return
+            }
             val trimmedSsid = ssid.trim()
             if (trimmedSsid.isEmpty()) return
             val credentials = CameraWifiCredentials(ssid = trimmedSsid, passphrase = null)

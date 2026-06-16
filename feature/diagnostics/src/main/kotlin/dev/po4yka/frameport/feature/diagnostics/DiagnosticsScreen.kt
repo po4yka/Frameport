@@ -392,7 +392,7 @@ private fun DiagnosticEventRowPreview() {
                     timestamp = Instant.parse("2026-06-14T10:00:00Z"),
                     layer = ErrorLayer.Wifi,
                     category = defaultCategory(ErrorLayer.Wifi),
-                    message = "Wi-Fi camera network bound to socket fd=42",
+                    message = "Wi-Fi camera network bound to socket fd=<redacted-fd>",
                     sessionId = "session-preview-001",
                 ),
         )

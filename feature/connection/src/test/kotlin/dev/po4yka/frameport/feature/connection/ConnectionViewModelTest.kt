@@ -186,6 +186,19 @@ class ConnectionViewModelTest {
             assertEquals("FUJIFILM-X-T5", connected.ssid)
         }
 
+    @Test
+    fun connectIgnoredWhileAlreadyConnected() =
+        runTest(testDispatcher) {
+            fakeRepo.simulateSuccess(SessionId(7L))
+
+            viewModel.connect("FUJIFILM-X-T5")
+            advanceUntilIdle()
+            viewModel.connect("FUJIFILM-X-T5")
+            advanceUntilIdle()
+
+            assertEquals(1, fakeRepo.openSessionCallCount)
+        }
+
     // ── connect() — error paths ───────────────────────────────────────────────
 
     @Test

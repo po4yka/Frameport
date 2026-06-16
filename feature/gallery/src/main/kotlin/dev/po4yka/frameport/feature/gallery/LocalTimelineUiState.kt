@@ -32,14 +32,7 @@ sealed interface LocalTimelineUiState {
 }
 
 /**
- * Stable wrapper for a list of thumbnail URI strings to help the Compose compiler
- * infer skippability on [SessionCard]. Without this wrapper, [List<String>] is
- * treated as unstable because List is a mutable-capable interface.
- *
- * Residual instability note: [ImportSession] itself is a plain data class whose
- * [List<String>] thumbnailUris field will be seen as unstable by the Compose compiler
- * unless strong-skipping mode is enabled. Wrapping at the card boundary here limits
- * the recomposition blast radius to the thumbnail grid only.
+ * Stable wrapper for a list of thumbnail URI strings to help the Compose compiler infer skippability on [SessionCard]. Without this wrapper, [List<String>] is treated as unstable because List is a mutable-capable interface.
  */
 @Immutable
 data class StableThumbnailUris(

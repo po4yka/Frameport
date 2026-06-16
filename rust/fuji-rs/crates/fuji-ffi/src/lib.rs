@@ -33,6 +33,9 @@ static WIFI_SESSIONS: Mutex<BTreeMap<i64, OwnedFd>> = Mutex::new(BTreeMap::new()
 static USB_SESSIONS: Mutex<BTreeMap<i64, UsbPtpSession>> = Mutex::new(BTreeMap::new());
 /// Active transfer IDs. Populated by download operations once downstream is wired.
 static TRANSFERS: Mutex<BTreeSet<i64>> = Mutex::new(BTreeSet::new());
+/// Serializes cross-registry session lifecycle transitions. Keep this lock outside
+/// individual registry locks so close/start cannot miss each other's changes.
+static SESSION_LIFECYCLE: Mutex<()> = Mutex::new(());
 
 /// Live-view session handle: stop flag + worker thread join handle.
 struct LiveViewHandle {
@@ -156,6 +159,16 @@ pub fn native_close_session(session_id: i64) -> i32 {
     if session_id <= 0 {
         return ERR_INVALID_SESSION;
     }
+    let _lifecycle_guard = match SESSION_LIFECYCLE.lock() {
+        Ok(guard) => guard,
+        Err(_) => return ERR_PANIC,
+    };
+    // Stop any live-view worker tied to this session before dropping the owning
+    // session resource. This prevents a worker from outliving its parent session.
+    let in_liveview = match stop_liveview_worker(session_id) {
+        Ok(stopped) => stopped,
+        Err(code) => return code,
+    };
     // Remove from noop set (may or may not be present).
     let in_noop = match SESSIONS.lock() {
         Ok(mut sessions) => sessions.remove(&session_id),
@@ -171,7 +184,7 @@ pub fn native_close_session(session_id: i64) -> i32 {
         Ok(mut usb) => usb.remove(&session_id).is_some(),
         Err(_) => return ERR_PANIC,
     };
-    if in_noop || in_wifi || in_usb {
+    if in_noop || in_wifi || in_usb || in_liveview {
         OK
     } else {
         ERR_INVALID_SESSION
@@ -220,23 +233,20 @@ pub fn native_open_wifi_session(command_fd: i32) -> i64 {
 /// Android may close the `UsbDeviceConnection` independently; the dup remains valid.
 ///
 /// `descriptor_bytes` is a copy of the raw USB interface descriptor bytes from Android.
-/// They are parsed by `fuji_usb_ptp::open_from_owned_fd`, which validates every `bLength`
-/// field before indexing and locates the PTP bulk-IN / bulk-OUT endpoint pair.
 ///
-/// # Fd ownership (no double-dup)
+/// # Current implementation status
+/// Android `UsbDeviceConnection.fileDescriptor` is a device/control fd, not a readable and
+/// writable PTP bulk endpoint stream. Until USB is wired through Android `bulkTransfer` /
+/// `UsbRequest` or explicit usbfs endpoint ioctls, this function fails closed after taking and
+/// closing the transferred fd.
+///
+/// # Fd ownership
 /// `usb_fd` is an Android `Os.dup()` of the `UsbDeviceConnection` fd; Android has
-/// transferred exclusive ownership of that dup to Rust. Rust does NOT dup again — it
-/// hands `usb_fd` straight to `open_from_owned_fd`, which wraps it in an `OwnedFd` and
-/// owns it for the lifetime of the returned `UsbPtpSession`. Rust is therefore
-/// responsible for closing `usb_fd` on EVERY path:
-/// - success: the fd lives in the stored `UsbPtpSession` and is closed on session close/shutdown;
-/// - `open_from_owned_fd` error: the fd is closed inside that call (its `OwnedFd` drops);
-/// - pre-call error here (`!INITIALIZED`): closed explicitly via `libc_close`.
-///
-/// Android closes only the ORIGINAL connection fd via `UsbDeviceConnection.close()`.
+/// transferred exclusive ownership of that dup to Rust. Rust is responsible for closing `usb_fd`
+/// on EVERY path. Android closes only the ORIGINAL connection fd via `UsbDeviceConnection.close()`.
 ///
 /// Returns the new session id (> 0) on success, or a negative ERR_* sentinel on failure.
-pub fn native_usb_session_open(usb_fd: i32, descriptor_bytes: &[u8]) -> i64 {
+pub fn native_usb_session_open(usb_fd: i32, _descriptor_bytes: &[u8]) -> i64 {
     if !INITIALIZED.load(Ordering::SeqCst) {
         // OWNERSHIP: Android transferred the dup; close it so it does not leak,
         // since we never reach open_from_owned_fd.
@@ -246,22 +256,11 @@ pub fn native_usb_session_open(usb_fd: i32, descriptor_bytes: &[u8]) -> i64 {
         }
         return i64::from(ERR_NOT_INITIALIZED);
     }
-    // open_from_owned_fd takes ownership of usb_fd and closes it on ALL of its
-    // error paths (invalid fd, malformed descriptor, missing endpoint). On Ok it
-    // owns the fd via the session's BulkTransport.
-    let session = match fuji_usb_ptp::open_from_owned_fd(usb_fd, descriptor_bytes) {
-        Ok(session) => session,
-        Err(_) => return i64::from(ERR_INVALID_SESSION),
-    };
-    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
-    match USB_SESSIONS.lock() {
-        Ok(mut usb) => {
-            usb.insert(session_id, session);
-            session_id
-        }
-        // On mutex poison, `session` drops at end of scope and closes the fd. No leak.
-        Err(_) => i64::from(ERR_PANIC),
+    if usb_fd >= 0 {
+        // SAFETY: usb_fd is the Android dup, owned by Rust and not yet wrapped.
+        unsafe { libc_close(usb_fd) };
     }
+    i64::from(ERR_INVALID_SESSION)
 }
 
 /// Close a USB PTP session by id.
@@ -751,6 +750,20 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                 if live_view_fd < 0 {
                     return ERR_INVALID_SESSION;
                 }
+                let wifi_session_exists = match WIFI_SESSIONS.lock() {
+                    Ok(wifi) => wifi.contains_key(&session_id),
+                    Err(_) => return ERR_PANIC,
+                };
+                if !wifi_session_exists {
+                    return ERR_INVALID_SESSION;
+                }
+                let liveview_already_running = match LIVEVIEW_SESSIONS.lock() {
+                    Ok(lv) => lv.contains_key(&session_id),
+                    Err(_) => return ERR_PANIC,
+                };
+                if liveview_already_running {
+                    return ERR_INVALID_SESSION;
+                }
 
                 // ── Dup the fd before registering the GlobalRef (fail fast on bad fd) ──
                 // SAFETY: live_view_fd is supplied by Android, valid for the duration of
@@ -811,6 +824,8 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                     use std::os::fd::IntoRawFd;
                     owned_fd.into_raw_fd()
                 };
+                let raw_fd_consumed = Arc::new(AtomicBool::new(false));
+                let raw_fd_consumed_worker = Arc::clone(&raw_fd_consumed);
 
                 let worker = std::thread::Builder::new()
                     .name("frameport-liveview-worker".to_owned())
@@ -827,6 +842,7 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                         // The GlobalRef (callback_global) is captured by the closure;
                         // when the closure unwinds it is dropped by catch_unwind's
                         // internal unwind, releasing the JVM reference.
+                        let raw_fd_consumed_for_body = Arc::clone(&raw_fd_consumed_worker);
                         let result = catch_unwind(AssertUnwindSafe(move || {
                             // ── Obtain the cached JavaVM ───────────────────────────────────
                             let vm = match JAVA_VM.lock() {
@@ -848,14 +864,15 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                                     }
                                     None => {
                                         // Close the fd we took ownership of before returning.
-                                        // SAFETY: raw_fd was produced by into_raw_fd() above;
-                                        // we own it and must close it on error paths.
-                                        unsafe { libc_close(raw_fd) };
+                                        close_raw_fd_if_unconsumed(
+                                            raw_fd,
+                                            &raw_fd_consumed_for_body,
+                                        );
                                         return;
                                     }
                                 },
                                 Err(_) => {
-                                    unsafe { libc_close(raw_fd) };
+                                    close_raw_fd_if_unconsumed(raw_fd, &raw_fd_consumed_for_body);
                                     return;
                                 }
                             };
@@ -869,6 +886,7 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                                     // close raw_fd when dropped (end of this thread's scope).
                                     let std_stream =
                                         unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
+                                    raw_fd_consumed_for_body.store(true, Ordering::SeqCst);
                                     // Convert to a non-blocking tokio TcpStream inside the runtime.
 
                                     // ── Run a current-thread tokio runtime ────────────────────────
@@ -948,21 +966,16 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                                     Ok(())
                                 });
                             if attach_result.is_err() {
-                                // SAFETY: raw_fd was produced by into_raw_fd() above and attach
-                                // failed before TcpStream::from_raw_fd took ownership.
-                                unsafe { libc_close(raw_fd) };
+                                // attach failed before TcpStream::from_raw_fd took ownership.
+                                close_raw_fd_if_unconsumed(raw_fd, &raw_fd_consumed_for_body);
                             }
                         })); // end catch_unwind
 
                         // On panic: raw_fd may still be open if the panic occurred before
-                        // TcpStream::from_raw_fd took ownership. We attempt a best-effort
-                        // close; closing an already-closed fd returns EBADF which we ignore.
+                        // TcpStream::from_raw_fd took ownership. Close only while the raw fd is
+                        // still unconsumed; once TcpStream owns it, its Drop handles cleanup.
                         if result.is_err() {
-                            // SAFETY: raw_fd is RawFd (Copy). If from_raw_fd ran before the
-                            // panic, the TcpStream's Drop already closed it and this close
-                            // returns EBADF (ignored). If from_raw_fd had not yet run, this
-                            // is the only close, preventing the fd from leaking.
-                            unsafe { libc_close(raw_fd) };
+                            close_raw_fd_if_unconsumed(raw_fd, &raw_fd_consumed_worker);
                         }
                     });
 
@@ -974,41 +987,59 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                         // it here to avoid leaking the fd for the process lifetime.
                         // SAFETY: raw_fd was produced by into_raw_fd() above; we hold
                         // the only copy at this point (spawn failed, closure was dropped).
-                        unsafe { libc_close(raw_fd) };
+                        close_raw_fd_if_unconsumed(raw_fd, &raw_fd_consumed);
                         return ERR_PANIC;
                     }
                 };
 
                 // ── Register the handle in the live-view registry ─────────────────────
-                match LIVEVIEW_SESSIONS.lock() {
-                    Ok(mut lv) => {
-                        lv.insert(
-                            session_id,
-                            LiveViewHandle {
-                                stop_flag,
-                                wake_fd,
-                                worker: Some(join_handle),
-                            },
-                        );
-                        OK
+                let mut pending_handle = Some(LiveViewHandle {
+                    stop_flag,
+                    wake_fd,
+                    worker: Some(join_handle),
+                });
+                let register_result = {
+                    let _lifecycle_guard = match SESSION_LIFECYCLE.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return ERR_PANIC,
+                    };
+                    let parent_still_open = match WIFI_SESSIONS.lock() {
+                        Ok(wifi) => wifi.contains_key(&session_id),
+                        Err(_) => return ERR_PANIC,
+                    };
+                    if !parent_still_open {
+                        ERR_INVALID_SESSION
+                    } else {
+                        match LIVEVIEW_SESSIONS.lock() {
+                            Ok(mut lv) => {
+                                use std::collections::btree_map::Entry;
+                                match lv.entry(session_id) {
+                                    Entry::Vacant(slot) => {
+                                        let handle = pending_handle
+                                            .take()
+                                            .expect("pending live-view handle");
+                                        slot.insert(handle);
+                                        OK
+                                    }
+                                    Entry::Occupied(_) => ERR_INVALID_SESSION,
+                                }
+                            }
+                            Err(_) => ERR_PANIC,
+                        }
                     }
-                    Err(_) => {
-                        // OWNERSHIP/SAFETY: The registry mutex is poisoned, so this
-                        // session can never be stopped via nativeLiveViewStop. To
-                        // prevent the worker from running forever — holding the
-                        // duplicated socket fd and the JVM GlobalRef — we signal it
-                        // to stop and block until it exits before returning the error
-                        // sentinel. Dropping join_handle without joining would leave
-                        // an orphaned thread that leaks the fd and the GlobalRef for
-                        // the process lifetime.
-                        stop_flag.store(true, Ordering::SeqCst);
-                        wake_liveview_reader(&wake_fd);
-                        // join() returns Err only if the thread panicked; either way
-                        // the thread has exited and released its resources.
-                        let _ = join_handle.join();
-                        ERR_PANIC
+                };
+                if register_result != OK {
+                    // OWNERSHIP/SAFETY: The worker was spawned but could not be registered, so it
+                    // would otherwise be impossible to stop later. Signal and join it now.
+                    if let Some(mut handle) = pending_handle {
+                        handle.stop_flag.store(true, Ordering::SeqCst);
+                        wake_liveview_reader(&handle.wake_fd);
+                        if let Some(jh) = handle.worker.take() {
+                            let _ = jh.join();
+                        }
                     }
                 }
+                register_result
             }));
 
             match result {
@@ -1045,37 +1076,10 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
             // Idempotent: invalid id is not an error.
             return OK;
         }
-
-        // Remove the handle from the registry while holding the lock.
-        let maybe_handle = match LIVEVIEW_SESSIONS.lock() {
-            Ok(mut lv) => lv.remove(&session_id),
-            Err(_) => return ERR_PANIC,
-        };
-
-        // If no handle found, the session was already stopped (idempotent).
-        let mut handle = match maybe_handle {
-            Some(h) => h,
-            None => return OK,
-        };
-
-        // Signal the worker to exit.
-        // Relaxed is correct: the stop_flag is a pure termination signal with
-        // no data payload. The preceding Mutex::lock() (LIVEVIEW_SESSIONS) acts
-        // as a full fence; the following jh.join() provides acquire semantics
-        // that make the store visible to the now-exited worker thread. The
-        // reader (run_liveview_loop) uses Relaxed load and only requires
-        // eventual visibility — extra loop iterations on weakly-ordered CPUs
-        // before observing the flag are acceptable for a stop signal.
-        handle.stop_flag.store(true, Ordering::Relaxed);
-        wake_liveview_reader(&handle.wake_fd);
-
-        // Join the worker thread; this waits for the read loop to drain and exit.
-        // The GlobalRef inside the worker is dropped when the async block exits.
-        if let Some(jh) = handle.worker.take() {
-            let _ = jh.join();
+        match stop_liveview_worker(session_id) {
+            Ok(_) => OK,
+            Err(code) => code,
         }
-
-        OK
     }));
 
     match result {
@@ -1183,6 +1187,35 @@ unsafe fn libc_close(fd: i32) {
     let _ = unsafe { close(fd) };
 }
 
+fn close_raw_fd_if_unconsumed(raw_fd: i32, consumed: &AtomicBool) {
+    if !consumed.swap(true, Ordering::SeqCst) {
+        // SAFETY: raw_fd was produced by into_raw_fd() and has not yet been transferred to TcpStream or closed by this helper.
+        unsafe { libc_close(raw_fd) };
+    }
+}
+
+fn stop_liveview_worker(session_id: i64) -> Result<bool, i32> {
+    let maybe_handle = match LIVEVIEW_SESSIONS.lock() {
+        Ok(mut lv) => lv.remove(&session_id),
+        Err(_) => return Err(ERR_PANIC),
+    };
+
+    let mut handle = match maybe_handle {
+        Some(handle) => handle,
+        None => return Ok(false),
+    };
+
+    // Relaxed is correct: the stop_flag is a pure termination signal with no data payload. The preceding Mutex::lock() acts as a full fence; the following join() provides acquire semantics that make the store visible to the now-exited worker thread.
+    handle.stop_flag.store(true, Ordering::Relaxed);
+    wake_liveview_reader(&handle.wake_fd);
+
+    if let Some(jh) = handle.worker.take() {
+        let _ = jh.join();
+    }
+
+    Ok(true)
+}
+
 /// Wake the live-view worker if it is blocked in a socket read.
 ///
 /// The fd is a duplicate of the same socket description used by the worker's
@@ -1222,6 +1255,7 @@ mod tests {
         SESSIONS.lock().unwrap().clear();
         WIFI_SESSIONS.lock().unwrap().clear();
         USB_SESSIONS.lock().unwrap().clear();
+        LIVEVIEW_SESSIONS.lock().unwrap().clear();
         TRANSFERS.lock().unwrap().clear();
     }
 
@@ -1311,6 +1345,28 @@ mod tests {
     }
 
     #[test]
+    fn usb_session_open_fails_closed_until_endpoint_transport_is_wired() {
+        let _g = TEST_MUTEX.lock().unwrap();
+        reset();
+        native_initialize();
+        let devnull = std::fs::File::open("/dev/null").expect("open /dev/null");
+        // SAFETY: devnull.as_raw_fd() is live for this immediate dup. The returned
+        // OwnedFd is transferred to native_usb_session_open via into_raw_fd.
+        let usb_fd = unsafe { BorrowedFd::borrow_raw(devnull.as_raw_fd()) }
+            .try_clone_to_owned()
+            .expect("dup /dev/null");
+        use std::os::fd::IntoRawFd;
+        let raw = usb_fd.into_raw_fd();
+
+        let id = native_usb_session_open(raw, &[]);
+
+        assert_eq!(id, i64::from(ERR_INVALID_SESSION));
+        assert!(USB_SESSIONS.lock().unwrap().is_empty());
+        assert!(raw_fd_is_closed(raw));
+        native_shutdown();
+    }
+
+    #[test]
     fn close_session_removes_wifi_session() {
         let _g = TEST_MUTEX.lock().unwrap();
         reset();
@@ -1324,6 +1380,58 @@ mod tests {
         // Second close: session gone -> ERR_INVALID_SESSION
         assert_eq!(native_close_session(id), ERR_INVALID_SESSION);
         native_shutdown();
+    }
+
+    #[test]
+    fn close_session_stops_liveview_worker_for_session() {
+        use std::os::unix::net::UnixStream;
+
+        let _g = TEST_MUTEX.lock().unwrap();
+        reset();
+        native_initialize();
+        let devnull = std::fs::File::open("/dev/null").expect("open /dev/null");
+        use std::os::fd::AsRawFd;
+        let id = native_open_wifi_session(devnull.as_raw_fd());
+        assert!(id > 0);
+
+        let (wake_socket, _peer) = UnixStream::pair().expect("create socket pair");
+        // SAFETY: wake_socket.as_raw_fd() is live for this immediate dup. The returned
+        // OwnedFd is independent and owned by the inserted LiveViewHandle.
+        let wake_fd = unsafe { BorrowedFd::borrow_raw(wake_socket.as_raw_fd()) }
+            .try_clone_to_owned()
+            .expect("dup wake socket");
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let worker_stop_flag = Arc::clone(&stop_flag);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop_flag.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
+        });
+        LIVEVIEW_SESSIONS.lock().unwrap().insert(
+            id,
+            LiveViewHandle {
+                stop_flag,
+                wake_fd,
+                worker: Some(worker),
+            },
+        );
+
+        assert_eq!(native_close_session(id), OK);
+
+        assert!(WIFI_SESSIONS.lock().unwrap().is_empty());
+        assert!(LIVEVIEW_SESSIONS.lock().unwrap().is_empty());
+        native_shutdown();
+    }
+
+    fn raw_fd_is_closed(fd: i32) -> bool {
+        const F_GETFD: i32 = 1;
+
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+
+        // SAFETY: fcntl(F_GETFD) does not take ownership of fd. Passing a closed fd is allowed and returns -1 with EBADF.
+        unsafe { fcntl(fd, F_GETFD) == -1 }
     }
 
     #[test]

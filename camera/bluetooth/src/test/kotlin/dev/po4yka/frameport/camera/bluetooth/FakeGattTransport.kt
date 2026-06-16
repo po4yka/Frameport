@@ -1,5 +1,6 @@
 package dev.po4yka.frameport.camera.bluetooth
 
+import dev.po4yka.frameport.camera.api.BleCameraRef
 import dev.po4yka.frameport.camera.api.BleConnectionState
 import dev.po4yka.frameport.camera.api.CharacteristicId
 import kotlinx.coroutines.flow.Flow
@@ -88,7 +89,7 @@ class FakeGattTransport : GattTransport {
     // -------------------------------------------------------------------------
 
     // cancel-safe: no shared state mutated after suspend; cancellation is safe.
-    override suspend fun connect() {
+    override suspend fun connect(camera: BleCameraRef) {
         connectCallCount++
         connectError?.let { throw it }
         _connectionState.value = BleConnectionState.Connecting

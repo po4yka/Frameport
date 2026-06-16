@@ -12,6 +12,8 @@
 //!   in any form to logging infrastructure.
 //! - Pairing tokens are opaque `[u8; 4]` — the caller must not log them.
 
+use std::fmt;
+
 use fuji_core::{BleProtocolError, FujiError, FujiResult};
 
 use crate::constants::{MANUFACTURER_COMPANY_ID, PAIRING_MODE_TYPE_BYTE, PAIRING_TOKEN_SIZE};
@@ -25,13 +27,19 @@ use crate::constants::{MANUFACTURER_COMPANY_ID, PAIRING_MODE_TYPE_BYTE, PAIRING_
 /// not be cached or reused across sessions.
 ///
 /// Source: ble-wifi-discovery.md §"Pairing Key" + §"Pairing Mode Indicator". [H] LFJ
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PairingToken(pub [u8; PAIRING_TOKEN_SIZE]);
 
 impl PairingToken {
     /// Return the raw 4-byte token suitable for writing to `CHR_PAIRING_KEY`.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl fmt::Debug for PairingToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PairingToken(<redacted>)")
     }
 }
 
@@ -179,6 +187,24 @@ mod tests {
         assert!(adv.is_in_pairing_mode);
         let token = adv.pairing_token.unwrap();
         assert_eq!(token.0, [0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn debug_output_redacts_pairing_token_bytes() {
+        let payload = [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD];
+        let adv = parse_manufacturer_payload(&payload).unwrap();
+
+        let debug = format!("{adv:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("AA"));
+        assert!(!debug.contains("BB"));
+        assert!(!debug.contains("CC"));
+        assert!(!debug.contains("DD"));
+        assert!(!debug.contains("170"));
+        assert!(!debug.contains("187"));
+        assert!(!debug.contains("204"));
+        assert!(!debug.contains("221"));
     }
 
     #[test]

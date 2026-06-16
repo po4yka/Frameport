@@ -12,7 +12,7 @@ import javax.inject.Singleton
  * output. SHA-256 is computed via [java.security.MessageDigest] — no external dep.
  *
  * PRIVACY CONTRACT:
- *  - Raw device serial numbers, MAC addresses, SSIDs, GPS coordinates, and filenames
+ *  - Raw device serial numbers, MAC addresses, SSIDs, GPS coordinates, filenames, and internal fd handles
  *    MUST NEVER appear in logs or diagnostic events.
  *  - Pass any such value through the corresponding method before use.
  *  - GPS and filenames are sentinel-redacted (fixed string); serial/MAC/SSID are hashed
@@ -88,6 +88,7 @@ class RedactionPipeline
                     Regex("""(?i)(\b(?:passphrase|password|secret|token|pairing[-_ ]?key)\b\s*[:=]\s*)[^\s,;]+""") to "\$1<redacted-secret>",
                     Regex("""(?i)(\b(?:serial|serialNumber|cameraSerial)\b\s*[:=]\s*)[A-Z0-9][A-Z0-9_-]{3,}""") to "\$1<redacted-serial>",
                     Regex("""(?i)(\bssid\b\s*[:=]\s*)[^,;]+""") to "\$1<redacted-ssid>",
+                    Regex("""(?i)(\b(?:fd|socketFd|usbFd|liveViewFd|eventFd|dupFd)\b\s*[:=]\s*)-?\d+""") to "\$1<redacted-fd>",
                     Regex("""\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b""") to "<redacted-mac>",
                     Regex("""\b(?:\d{1,3}\.){3}\d{1,3}\b""") to "<redacted-ip>",
                     Regex("""[-+]?\d{1,2}\.\d{3,}\s*,\s*[-+]?\d{1,3}\.\d{3,}""") to "<redacted-gps>",

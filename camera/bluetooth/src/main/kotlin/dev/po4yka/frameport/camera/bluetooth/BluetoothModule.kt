@@ -36,8 +36,7 @@ internal abstract class BluetoothModule {
     /**
      * Bind the real Android BLE scanner implementation.
      *
-     * [AndroidBleScanner] wraps [android.bluetooth.le.BluetoothLeScanner] with a
-     * manufacturer-ID scan filter (0x04D8) applied at the Android layer.
+     * [AndroidBleScanner] wraps Kable Scanner with a manufacturer-ID scan filter (0x04D8) applied at the Android layer.
      */
     @Binds
     @Singleton
@@ -46,8 +45,7 @@ internal abstract class BluetoothModule {
     /**
      * Bind the real Android GATT transport implementation.
      *
-     * [AndroidGattTransport] wraps [android.bluetooth.BluetoothGatt] and its callback.
-     * All BluetoothGatt method calls are serialized by the [AndroidFujiBleClient] actor.
+     * [AndroidGattTransport] wraps Kable Peripheral. All GATT operations are serialized by the [AndroidFujiBleClient] actor.
      */
     @Binds
     @Singleton

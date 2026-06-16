@@ -36,7 +36,7 @@ class DiagnosticCollectorTest {
                     category = DiagnosticCategory.WifiEvent,
                     message =
                         "connect failed ip=192.168.0.1 mac=AA:BB:CC:DD:EE:FF " +
-                            "serial=3AB12345 passphrase=hunter2 file=DSCF1234.RAF",
+                            "serial=3AB12345 passphrase=hunter2 file=DSCF1234.RAF socketFd=42",
                     metadata =
                         mapOf(
                             "ssid" to "ssid=Home Camera WiFi",
@@ -56,6 +56,7 @@ class DiagnosticCollectorTest {
             assertFalse(combined.contains("hunter2"))
             assertFalse(combined.contains("Home Camera WiFi"))
             assertFalse(combined.contains("DSCF1234.RAF"))
+            assertFalse(combined.contains("socketFd=42"))
             assertFalse(combined.contains("41.7151"))
             assertFalse(combined.contains("44.8271"))
             assertTrue(combined.contains("<redacted-ip>"))
@@ -65,6 +66,7 @@ class DiagnosticCollectorTest {
             assertTrue(combined.contains("<redacted-ssid>"))
             assertTrue(combined.contains("<redacted-filename>"))
             assertTrue(combined.contains("<redacted-gps>"))
+            assertTrue(combined.contains("<redacted-fd>"))
         }
 
     @Test

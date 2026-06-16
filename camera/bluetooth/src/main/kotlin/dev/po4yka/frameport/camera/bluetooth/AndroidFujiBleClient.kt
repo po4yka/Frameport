@@ -147,7 +147,7 @@ class AndroidFujiBleClient
 
             targetCamera = camera
             val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
-            val op = GattOperation.Connect(deferred)
+            val op = GattOperation.Connect(camera, deferred)
 
             // Enqueue BEFORE mutating state so that a closed/full queue failure does not
             // strand _connectionState at Connecting.
@@ -311,7 +311,7 @@ class AndroidFujiBleClient
             while (attempt <= BleConstants.RECONNECT_MAX_ATTEMPTS) {
                 try {
                     withTimeout(BleConstants.GATT_CONNECT_TIMEOUT_MS) {
-                        gattTransport.connect()
+                        gattTransport.connect(op.camera)
                         gattTransport.discoverServices()
                         val negotiatedMtu = gattTransport.requestMtu(BleConstants.PREFERRED_MTU)
                         Timber.d("BLE: connected, negotiated MTU=$negotiatedMtu")

@@ -1,12 +1,13 @@
 package dev.po4yka.frameport.camera.bluetooth
 
+import dev.po4yka.frameport.camera.api.BleCameraRef
 import dev.po4yka.frameport.camera.api.BleConnectionState
 import dev.po4yka.frameport.camera.api.CharacteristicId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Injectable seam over the Android BluetoothGatt API.
+ * Injectable seam over the BLE GATT implementation.
  *
  * This interface decouples the GATT operation queue and reconnect logic in
  * [AndroidFujiBleClient] from real Android framework types, allowing full
@@ -17,9 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
  * interface itself carries no threading guarantees; the caller (the actor)
  * is responsible for serialization.
  *
- * Ownership: [AndroidGattTransport] holds the real [android.bluetooth.BluetoothGatt]
- * reference. This interface exposes only the subset of GATT operations required
- * by [AndroidFujiBleClient]. Scanning is owned separately by [BleScanner].
+ * Ownership: [AndroidGattTransport] holds the Kable Peripheral. This interface exposes only the subset of GATT operations required by [AndroidFujiBleClient]. Scanning is owned separately by [BleScanner].
  */
 internal interface GattTransport {
     /**
@@ -39,20 +38,18 @@ internal interface GattTransport {
     fun notificationFlow(characteristicId: CharacteristicId): Flow<ByteArray>
 
     /**
-     * Initiate a GATT connection to the device identified during scan.
-     * Suspends until [android.bluetooth.BluetoothGattCallback.onConnectionStateChange]
-     * fires with CONNECTED, or throws on failure/timeout.
+     * Initiate a GATT connection to [camera], which must have been produced by [BleScanner].
+     * Suspends until Kable reports a connected peripheral with discovered services, or throws on failure/timeout.
      *
      * Must be called from the actor coroutine only.
      * cancel-safe: if cancelled before CONNECTED, the underlying connect attempt is
      * aborted by the caller via [disconnect].
      */
-    suspend fun connect()
+    suspend fun connect(camera: BleCameraRef)
 
     /**
      * Discover GATT services after a successful [connect].
-     * Suspends until [android.bluetooth.BluetoothGattCallback.onServicesDiscovered]
-     * fires, or throws on failure/timeout.
+     * Verifies Kable has discovered services after a successful [connect].
      *
      * Must be called from the actor coroutine only.
      * cancel-safe: no mutable shared state mutated mid-discovery; cancellation is safe.
@@ -61,8 +58,7 @@ internal interface GattTransport {
 
     /**
      * Request an MTU of [mtu] bytes after service discovery.
-     * Suspends until [android.bluetooth.BluetoothGattCallback.onMtuChanged]
-     * fires, or returns the current MTU on failure (MTU negotiation is best-effort).
+     * Returns the currently negotiated MTU value, or the default Kable-reported write capacity plus ATT headers.
      *
      * Must be called from the actor coroutine only.
      * cancel-safe: MTU negotiation is advisory; cancellation leaves the connection intact.
@@ -71,8 +67,7 @@ internal interface GattTransport {
 
     /**
      * Read the value of [characteristicId].
-     * Suspends until [android.bluetooth.BluetoothGattCallback.onCharacteristicRead]
-     * fires, or throws on failure/timeout.
+     * Suspends until the GATT read completes, or throws on failure/timeout.
      *
      * Must be called from the actor coroutine only.
      * cancel-safe: read op is atomic at the GATT level; cancellation after dispatch
@@ -82,8 +77,7 @@ internal interface GattTransport {
 
     /**
      * Write [payload] to [characteristicId] (WRITE_TYPE_DEFAULT — awaits response).
-     * Suspends until [android.bluetooth.BluetoothGattCallback.onCharacteristicWrite]
-     * fires, or throws on failure/timeout.
+     * Suspends until the GATT write completes, or throws on failure/timeout.
      *
      * Must be called from the actor coroutine only.
      * cancel-safe: write is dispatched as an atomic unit; the camera may or may not
@@ -95,10 +89,7 @@ internal interface GattTransport {
     )
 
     /**
-     * Enable (or disable) CCCD notifications for [characteristicId].
-     * Calls [android.bluetooth.BluetoothGatt.setCharacteristicNotification] then
-     * writes the CCCD descriptor (0x0001 to enable, 0x0000 to disable).
-     * Suspends until the descriptor write callback fires.
+     * Enable (or disable) notifications for [characteristicId] where the implementation supports an explicit subscription step.
      *
      * Must be called from the actor coroutine only.
      * cancel-safe: descriptor write is atomic; cancellation mid-flight is safe.

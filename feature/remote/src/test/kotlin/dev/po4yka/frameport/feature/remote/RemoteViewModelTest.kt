@@ -4,6 +4,8 @@ package dev.po4yka.frameport.feature.remote
 
 import app.cash.turbine.test
 import dev.po4yka.frameport.camera.api.BleConnectionState
+import dev.po4yka.frameport.camera.api.CameraProfile
+import dev.po4yka.frameport.camera.api.CameraProfileRepository
 import dev.po4yka.frameport.camera.api.RemoteCaptureError
 import dev.po4yka.frameport.camera.api.RemoteCaptureRequest
 import dev.po4yka.frameport.camera.api.RemoteCaptureState
@@ -16,6 +18,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -92,6 +97,7 @@ class RemoteViewModelTest {
     private lateinit var testDispatcher: TestDispatcher
     private lateinit var fakeBle: FakeFujiBleClient
     private lateinit var fakeSdk: FakeFujiNativeSdk
+    private lateinit var fakeProfileRepository: FakeCameraProfileRepository
     private lateinit var useCase: RemoteCaptureUseCase
     private lateinit var viewModel: RemoteViewModel
 
@@ -101,8 +107,9 @@ class RemoteViewModelTest {
         Dispatchers.setMain(testDispatcher)
         fakeBle = FakeFujiBleClient()
         fakeSdk = FakeFujiNativeSdk()
+        fakeProfileRepository = FakeCameraProfileRepository()
         useCase = buildUseCase(fakeBle, fakeSdk, testDispatcher)
-        viewModel = RemoteViewModel(useCase)
+        viewModel = RemoteViewModel(useCase, fakeProfileRepository)
     }
 
     @After
@@ -298,9 +305,8 @@ class RemoteViewModelTest {
 
     /**
      * Verifies that AllowlistRemoteCapabilityChecker rejects a null camera model
-     * and emits IncompatibleCamera. The ViewModel stubs cameraModel = "X-T5" so the
-     * gate always passes in production M15 code; this test exercises the use-case
-     * gate directly via runBlocking to confirm the mapping is correct.
+     * and emits IncompatibleCamera. This exercises the use-case gate directly to confirm the
+     * mapping is correct.
      *
      * Driven under [runTest] (not plain runBlocking): the use case applies
      * flowOn([testDispatcher]); runTest advances that scheduler so the cold flow
@@ -520,18 +526,18 @@ class RemoteViewModelTest {
             assertEquals(0x00.toByte(), releasePayload[1])
         }
 
-    // ── Camera-model stub (capability gate passes for X-T5) ───────────────────
+    // ── Camera model capability gate ─────────────────────────────────────────
 
     /**
      * Given: BLE is Connected.
      * When:  user triggers HalfPress.
-     * Then:  a BLE write is issued — confirming the ViewModel's "X-T5" stub
+     * Then:  a BLE write is issued because the current profile reports X-T5 and
      *        passes the AllowlistRemoteCapabilityChecker gate.
      *
      * If the gate had rejected the model, no write would be attempted.
      */
     @Test
-    fun viewModelPassesXt5CameraModelSoCapabilityGatePasses() =
+    fun viewModelUsesCurrentProfileModelSoCapabilityGatePasses() =
         runTest(testDispatcher) {
             fakeBle.setConnectionState(BleConnectionState.Connected)
 
@@ -539,8 +545,59 @@ class RemoteViewModelTest {
             advanceUntilIdle()
 
             assertTrue(
-                "Expected at least one BLE write (capability gate passed for X-T5 stub)",
+                "Expected at least one BLE write (capability gate passed for current X-T5 profile)",
                 fakeBle.writeCalls.isNotEmpty(),
             )
         }
+
+    @Test
+    fun viewModelFailsClosedWhenCurrentProfileIsMissing() =
+        runTest(testDispatcher) {
+            fakeBle.setConnectionState(BleConnectionState.Connected)
+            fakeProfileRepository.currentProfile = null
+
+            viewModel.onAction(RemoteAction.HalfPress)
+            advanceUntilIdle()
+
+            val state = viewModel.uiState.value
+            assertTrue(
+                "Expected incompatible-camera error when current profile is unavailable, got $state",
+                state is RemoteShutterUiState.IncompatibleCamera,
+            )
+            assertTrue(fakeBle.writeCalls.isEmpty())
+        }
+}
+
+private class FakeCameraProfileRepository : CameraProfileRepository {
+    var currentProfile: CameraProfile? =
+        CameraProfile(
+            profileId = "profile-test",
+            cameraModel = "X-T5",
+            firmwareVersion = "1.00",
+            serialHash = "serial:test",
+            transportCapabilities = 0L,
+            compatibilityFlags = 0L,
+            firstSeenEpochMs = 0L,
+            lastSeenEpochMs = 0L,
+            notes = null,
+        )
+
+    private val profileFlow = MutableStateFlow<List<CameraProfile>>(emptyList())
+
+    override val profiles: StateFlow<List<CameraProfile>> = profileFlow.asStateFlow()
+
+    override suspend fun upsertOnSessionOpen(
+        sessionId: dev.po4yka.frameport.camera.api.SessionId,
+        cameraModel: String,
+        firmwareVersion: String,
+        rawSerialOrStableId: String,
+        transportCapabilities: Long,
+        compatibilityFlags: Long,
+    ) = Unit
+
+    override suspend fun getProfileBySerialHash(serialHash: String): CameraProfile? = currentProfile
+
+    override suspend fun deleteProfile(profileId: String) = Unit
+
+    override fun getProfileForCurrentCamera(): CameraProfile? = currentProfile
 }

@@ -35,6 +35,7 @@ dependencies {
     implementation(projects.core.common)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.hilt.android)
+    implementation(libs.kable.core)
     implementation(libs.timber)
     ksp(libs.androidx.hilt.compiler)
 

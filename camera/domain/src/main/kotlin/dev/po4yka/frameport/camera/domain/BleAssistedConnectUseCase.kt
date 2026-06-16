@@ -11,6 +11,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import javax.inject.Inject
 
 /**
@@ -260,7 +263,12 @@ private object StopCollectionSignal : Throwable()
  */
 private fun ByteArray.decodeToStringOrNull(): String? =
     try {
-        toString(Charsets.UTF_8)
+        StandardCharsets.UTF_8
+            .newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(this))
+            .toString()
     } catch (_: Exception) {
         null
     }

@@ -4,18 +4,14 @@ import dev.po4yka.frameport.camera.api.BleCameraAdvertisement
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Injectable seam over [android.bluetooth.le.BluetoothLeScanner].
+ * Injectable seam over BLE scanning.
  *
- * The real implementation ([AndroidBleScanner]) applies a [android.bluetooth.le.ScanFilter]
- * on manufacturer company ID 0x04D8 (Fujifilm) and optionally on the SERVICE_CAMERA_CONTROL
- * UUID, delegating device selection to the Android BLE stack before any payload parsing.
+ * The real implementation ([AndroidBleScanner]) delegates scanning to Kable and applies a native manufacturer filter on company ID 0x04D8 (Fujifilm) before any payload parsing.
  *
  * The fake implementation ([FakeBleScanner]) used in JVM unit tests emits advertisements
  * from a controlled list without touching Android framework types.
  *
- * Ownership: Scanning is separate from the GATT operation queue. The scanner starts and
- * stops independently of [GattTransport]. Once a target camera is selected from the scan
- * results, scanning is stopped and the [AndroidFujiBleClient] transitions to connecting.
+ * Ownership: Scanning is separate from the GATT operation queue. The scanner starts and stops independently of [GattTransport]. Once a target camera is selected from the scan results, scanning is stopped and the [AndroidFujiBleClient] transitions to connecting.
  *
  * Privacy: Raw BLE MAC addresses emitted in [BleCameraAdvertisement.camera.id] must
  * NOT appear in any Timber log call. See privacy-local-first.md.

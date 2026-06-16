@@ -150,7 +150,12 @@ private fun TimelineLoadedContent(
     ) {
         items(items = sessions, key = { it.sessionKey }) { session ->
             SessionCard(
-                session = session,
+                sessionKey = session.sessionKey,
+                endedAtEpochMs = session.endedAtEpochMs,
+                objectCount = session.objectCount,
+                totalBytes = session.totalBytes,
+                durationMs = session.durationMs,
+                transportLabel = session.transportLabel,
                 thumbnails = StableThumbnailUris(session.thumbnailUris),
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
@@ -163,19 +168,21 @@ private fun TimelineLoadedContent(
 /**
  * Card for a single [ImportSession]. Tapping expands or collapses the thumbnail grid.
  *
- * Stability note: [ImportSession.thumbnailUris] is a [List<String>] which the Compose compiler
- * treats as unstable. The caller wraps it in [StableThumbnailUris] so that recomposition of
- * this composable skips when only unrelated session fields change. The [session] parameter
- * itself may still trigger recomposition until [ImportSession] is annotated @Stable or the
- * project enables strong-skipping mode (M19 hardening).
+ * Stability note: callers pass scalar values plus [StableThumbnailUris] instead of the raw
+ * [ImportSession], keeping this card skippable without coupling :core:model to Compose runtime annotations.
  */
 @Composable
 private fun SessionCard(
-    session: ImportSession,
+    sessionKey: String,
+    endedAtEpochMs: Long,
+    objectCount: Int,
+    totalBytes: Long,
+    durationMs: Long,
+    transportLabel: String,
     thumbnails: StableThumbnailUris,
     modifier: Modifier = Modifier,
 ) {
-    var expanded by rememberSaveable(session.sessionKey) { mutableStateOf(false) }
+    var expanded by rememberSaveable(sessionKey) { mutableStateOf(false) }
 
     Card(
         modifier =
@@ -184,7 +191,13 @@ private fun SessionCard(
                 .clickable { expanded = !expanded },
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            SessionCardHeader(session = session)
+            SessionCardHeader(
+                endedAtEpochMs = endedAtEpochMs,
+                objectCount = objectCount,
+                totalBytes = totalBytes,
+                durationMs = durationMs,
+                transportLabel = transportLabel,
+            )
             AnimatedVisibility(visible = expanded && thumbnails.uris.isNotEmpty()) {
                 Column {
                     Spacer(modifier = Modifier.height(12.dp))
@@ -197,12 +210,16 @@ private fun SessionCard(
 
 @Composable
 private fun SessionCardHeader(
-    session: ImportSession,
+    endedAtEpochMs: Long,
+    objectCount: Int,
+    totalBytes: Long,
+    durationMs: Long,
+    transportLabel: String,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
         Text(
-            text = formatSessionDate(session.endedAtEpochMs),
+            text = formatSessionDate(endedAtEpochMs),
             style = MaterialTheme.typography.titleSmall,
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -211,22 +228,22 @@ private fun SessionCardHeader(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                text = "${session.objectCount} items",
+                text = "$objectCount items",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = formatBytes(session.totalBytes),
+                text = formatBytes(totalBytes),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = formatDuration(session.durationMs),
+                text = formatDuration(durationMs),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = session.transportLabel,
+                text = transportLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
