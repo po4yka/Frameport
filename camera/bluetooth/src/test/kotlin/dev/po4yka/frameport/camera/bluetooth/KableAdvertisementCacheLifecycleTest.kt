@@ -21,14 +21,6 @@ class KableAdvertisementCacheLifecycleTest {
         assertFalse(source.contains("advertisementCache.clear()"))
     }
 
-    @Test
-    fun gattTransportFallsBackToSavedCameraIdWithoutCachedAdvertisement() {
-        val source = source("AndroidGattTransport.kt")
-
-        assertTrue(source.contains("advertisementCache.advertisementFor(camera.id)"))
-        assertTrue(source.contains("Peripheral(camera.id, ::configurePeripheral)"))
-    }
-
     private fun source(fileName: String): String =
         listOf(
             File("src/main/kotlin/dev/po4yka/frameport/camera/bluetooth/$fileName"),

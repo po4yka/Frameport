@@ -50,4 +50,8 @@ internal abstract class BluetoothModule {
     @Binds
     @Singleton
     abstract fun bindGattTransport(impl: AndroidGattTransport): GattTransport
+
+    @Binds
+    @Singleton
+    abstract fun bindKablePeripheralFactory(impl: DefaultKablePeripheralFactory): KablePeripheralFactory
 }

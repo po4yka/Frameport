@@ -1,7 +1,6 @@
 package dev.po4yka.frameport.camera.bluetooth
 
 import com.juul.kable.Characteristic
-import com.juul.kable.Peripheral
 import com.juul.kable.PeripheralBuilder
 import com.juul.kable.State
 import com.juul.kable.WriteType
@@ -35,15 +34,16 @@ internal class AndroidGattTransport
     @Inject
     constructor(
         private val advertisementCache: KableAdvertisementCache,
+        private val peripheralFactory: KablePeripheralFactory,
     ) : GattTransport {
         private val _connectionState = MutableStateFlow(BleConnectionState.Disconnected)
 
         override val connectionState: StateFlow<BleConnectionState> = _connectionState.asStateFlow()
 
         @Volatile
-        private var peripheral: Peripheral? = null
+        private var peripheral: KablePeripheralAdapter? = null
 
-        private val activePeripheralFlow = MutableStateFlow<Peripheral?>(null)
+        private val activePeripheralFlow = MutableStateFlow<KablePeripheralAdapter?>(null)
 
         override suspend fun connect(camera: BleCameraRef) {
             val advertisement =
@@ -52,9 +52,9 @@ internal class AndroidGattTransport
             closePeripheral()
             val nextPeripheral =
                 if (advertisement != null) {
-                    Peripheral(advertisement, ::configurePeripheral)
+                    peripheralFactory.create(advertisement, ::configurePeripheral)
                 } else {
-                    Peripheral(camera.id, ::configurePeripheral)
+                    peripheralFactory.create(camera.id, ::configurePeripheral)
                 }
             peripheral = nextPeripheral
             _connectionState.value = BleConnectionState.Connecting
@@ -109,7 +109,7 @@ internal class AndroidGattTransport
                     currentPeripheral.observe(characteristicFor(currentPeripheral, characteristicId))
                 }
 
-        private fun activePeripheral(): Peripheral =
+        private fun activePeripheral(): KablePeripheralAdapter =
             requireNotNull(peripheral) { "BLE peripheral is not connected" }
 
         private fun configurePeripheral(builder: PeripheralBuilder) {
@@ -127,7 +127,7 @@ internal class AndroidGattTransport
         }
 
         private fun characteristicFor(
-            currentPeripheral: Peripheral,
+            currentPeripheral: KablePeripheralAdapter,
             characteristicId: CharacteristicId,
         ): Characteristic {
             val characteristicUuid = Uuid.parse(characteristicId.value)
