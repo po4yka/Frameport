@@ -30,10 +30,12 @@ internal interface GattTransport {
 
     /**
      * Cold flow of incoming characteristic notification payloads for the given
-     * [characteristicId]. Emissions happen on the GATT callback thread; collectors
-     * should use [kotlinx.coroutines.flow.flowOn] to switch to a safe context.
+     * [characteristicId]. Collection before connect waits for the next active peripheral.
+     * Disconnect cancels the current platform observation while keeping the outer flow
+     * collectible for a later reconnect. Reconnect switches active collectors to the newest
+     * peripheral. Each collector owns an independent platform observation.
      *
-     * cancel-safe: cold SharedFlow subscription; collection cancellation unsubscribes cleanly.
+     * cancel-safe: collection cancellation unsubscribes the active platform observation cleanly.
      */
     fun notificationFlow(characteristicId: CharacteristicId): Flow<ByteArray>
 

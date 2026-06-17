@@ -219,8 +219,10 @@ class AndroidFujiBleClient
         /**
          * Cold flow of notification payloads for [characteristic].
          *
-         * cancel-safe: backed by a filtered SharedFlow from [GattTransport.notificationFlow];
-         * cancellation unsubscribes cleanly.
+         * The flow may be collected before connect; it begins observing once a peripheral is active.
+         * Disconnect cancels the active observation and reconnect attaches collectors to the new peripheral.
+         * Multiple collectors create independent platform observations.
+         * cancel-safe: cancellation unsubscribes the active observation cleanly.
          * Privacy: payload bytes are NEVER logged.
          */
         override fun notifications(characteristic: CharacteristicId): Flow<ByteArray> =

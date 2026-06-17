@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import timber.log.Timber
 import javax.inject.Inject
@@ -88,9 +88,8 @@ internal class AndroidGattTransport
 
         override fun notificationFlow(characteristicId: CharacteristicId): Flow<ByteArray> =
             activePeripheralFlow
-                .filterNotNull()
                 .flatMapLatest { currentPeripheral ->
-                    currentPeripheral.observe(characteristicId)
+                    currentPeripheral?.observe(characteristicId) ?: emptyFlow()
                 }
 
         private fun activePeripheral(): KablePeripheralAdapter =
