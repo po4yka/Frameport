@@ -9,13 +9,18 @@ import com.juul.kable.logs.Logging
 import dev.po4yka.frameport.camera.api.BleCameraRef
 import dev.po4yka.frameport.camera.api.BleConnectionState
 import dev.po4yka.frameport.camera.api.CharacteristicId
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -43,6 +48,7 @@ internal class AndroidGattTransport
         private var peripheral: Peripheral? = null
 
         private val activePeripheralFlow = MutableStateFlow<Peripheral?>(null)
+        private val explicitNotificationJobs = mutableMapOf<String, Job>()
 
         override suspend fun connect(camera: BleCameraRef) {
             val advertisement =
@@ -66,11 +72,7 @@ internal class AndroidGattTransport
                 }
             peripheral = nextPeripheral
             _connectionState.value = BleConnectionState.Connecting
-            try {
-                nextPeripheral.connect()
-            } finally {
-                advertisementCache.clear()
-            }
+            nextPeripheral.connect()
             activePeripheralFlow.value = nextPeripheral
             _connectionState.value =
                 when (nextPeripheral.state.value) {
@@ -112,14 +114,38 @@ internal class AndroidGattTransport
             characteristicId: CharacteristicId,
             enable: Boolean,
         ) {
-            if (!enable) return
             val currentPeripheral = activePeripheral()
-            currentPeripheral.observe(characteristicFor(currentPeripheral, characteristicId))
+            explicitNotificationJobs.remove(characteristicId.value)?.cancelAndJoin()
+            if (!enable) return
+
+            val characteristic = characteristicFor(currentPeripheral, characteristicId)
+            val subscribed = CompletableDeferred<Unit>()
+            val job =
+                currentPeripheral.scope.launch {
+                    try {
+                        currentPeripheral
+                            .observe(characteristic) {
+                                subscribed.complete(Unit)
+                            }.collect()
+                    } catch (e: Exception) {
+                        if (!subscribed.isCompleted) {
+                            subscribed.completeExceptionally(e)
+                        }
+                        throw e
+                    }
+                }
+            explicitNotificationJobs[characteristicId.value] = job
+            try {
+                subscribed.await()
+            } catch (e: Exception) {
+                explicitNotificationJobs.remove(characteristicId.value)
+                job.cancel()
+                throw e
+            }
         }
 
         override suspend fun disconnect() {
             closePeripheral()
-            advertisementCache.clear()
             _connectionState.value = BleConnectionState.Disconnected
             Timber.d("BLE: Kable peripheral disconnected and closed")
         }
@@ -153,6 +179,10 @@ internal class AndroidGattTransport
         }
 
         private suspend fun closePeripheral() {
+            explicitNotificationJobs.values.forEach { job ->
+                job.cancelAndJoin()
+            }
+            explicitNotificationJobs.clear()
             peripheral?.runCatching {
                 disconnect()
             }

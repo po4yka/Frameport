@@ -1,6 +1,7 @@
 package dev.po4yka.frameport.camera.bluetooth
 
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import java.io.File
 
@@ -13,12 +14,19 @@ class KableAdvertisementCacheLifecycleTest {
     }
 
     @Test
-    fun gattTransportClearsCachedAdvertisementsAfterConnectAndDisconnect() {
+    fun gattTransportRetainsCachedAdvertisementsAcrossConnectAndDisconnect() {
         val source = source("AndroidGattTransport.kt")
 
-        assertTrue(source.contains("finally {\n                advertisementCache.clear()\n            }"))
         assertTrue(source.contains("override suspend fun disconnect()"))
-        assertTrue(source.contains("advertisementCache.clear()"))
+        assertFalse(source.contains("advertisementCache.clear()"))
+    }
+
+    @Test
+    fun setNotificationCollectsKableObservationFlow() {
+        val source = source("AndroidGattTransport.kt")
+
+        assertTrue(source.contains(".observe(characteristic)"))
+        assertTrue(source.contains(".collect()"))
     }
 
     private fun source(fileName: String): String =
