@@ -62,8 +62,67 @@ class AndroidGattTransportSavedIdReconnectTest {
             assertEquals(1, factory.lastPeripheral.closeCallCount)
         }
 
+    @Test
+    fun connectPermissionDeniedMapsToBluetoothConnectPermissionError() =
+        runTest {
+            val cause = SecurityException("missing connect permission")
+            val factory = RecordingKablePeripheralFactory(connectFailure = cause)
+            val transport =
+                AndroidGattTransport(
+                    advertisementCache = KableAdvertisementCache(),
+                    peripheralFactory = factory,
+                )
+
+            val result =
+                runCatching {
+                    transport.connect(
+                        BleCameraRef(
+                            id = "AA:BB:CC:DD:EE:FF",
+                            displayName = "X-T5",
+                        ),
+                    )
+                }
+            val failure = result.exceptionOrNull() as BleTransportException.PermissionDenied
+
+            assertEquals("android.permission.BLUETOOTH_CONNECT", failure.permission)
+            assertEquals(cause, failure.cause)
+            assertEquals(BleConnectionState.Disconnected, transport.connectionState.value)
+            assertEquals(1, factory.lastPeripheral.disconnectCallCount)
+            assertEquals(1, factory.lastPeripheral.closeCallCount)
+        }
+
+    @Test
+    fun connectBluetoothDisabledMapsToBluetoothDisabledError() =
+        runTest {
+            val cause = IllegalStateException("Bluetooth disabled")
+            val factory = RecordingKablePeripheralFactory(connectFailure = cause)
+            val transport =
+                AndroidGattTransport(
+                    advertisementCache = KableAdvertisementCache(),
+                    peripheralFactory = factory,
+                )
+
+            val result =
+                runCatching {
+                    transport.connect(
+                        BleCameraRef(
+                            id = "AA:BB:CC:DD:EE:FF",
+                            displayName = "X-T5",
+                        ),
+                    )
+                }
+            val failure = result.exceptionOrNull()
+
+            assertEquals(BleTransportException.BluetoothDisabled::class, failure!!::class)
+            assertEquals(cause, failure.cause)
+            assertEquals(BleConnectionState.Disconnected, transport.connectionState.value)
+            assertEquals(1, factory.lastPeripheral.disconnectCallCount)
+            assertEquals(1, factory.lastPeripheral.closeCallCount)
+        }
+
     private class RecordingKablePeripheralFactory(
         private val connectReportsConnected: Boolean = true,
+        private val connectFailure: Throwable? = null,
     ) : KablePeripheralFactory {
         val identifierCreates = mutableListOf<String>()
         var advertisementCreateCount = 0
@@ -71,19 +130,20 @@ class AndroidGattTransportSavedIdReconnectTest {
 
         override fun create(advertisement: Advertisement): KablePeripheralAdapter {
             advertisementCreateCount++
-            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected)
+            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected, connectFailure)
             return lastPeripheral
         }
 
         override fun create(identifier: String): KablePeripheralAdapter {
             identifierCreates += identifier
-            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected)
+            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected, connectFailure)
             return lastPeripheral
         }
     }
 
     private class RecordingKablePeripheralAdapter(
         private val connectReportsConnected: Boolean,
+        private val connectFailure: Throwable?,
     ) : KablePeripheralAdapter {
         override var isConnected: Boolean = false
             private set
@@ -94,6 +154,7 @@ class AndroidGattTransportSavedIdReconnectTest {
 
         override suspend fun connect() {
             connectCallCount++
+            connectFailure?.let { throw it }
             isConnected = connectReportsConnected
         }
 

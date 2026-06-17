@@ -1,16 +1,12 @@
 package dev.po4yka.frameport.camera.bluetooth
 
 import android.annotation.SuppressLint
-import android.bluetooth.le.ScanSettings
-import com.juul.kable.Filter
-import com.juul.kable.ObsoleteKableApi
-import com.juul.kable.Scanner
-import com.juul.kable.logs.Logging
 import dev.po4yka.frameport.camera.api.BleCameraAdvertisement
 import dev.po4yka.frameport.camera.api.BleCameraRef
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -26,33 +22,8 @@ internal class AndroidBleScanner
     @Inject
     constructor(
         private val advertisementCache: KableAdvertisementCache,
+        private val advertisementSource: KableAdvertisementSource,
     ) : BleScanner {
-        @OptIn(ObsoleteKableApi::class)
-        private val scanner =
-            Scanner {
-                filters {
-                    match {
-                        manufacturerData =
-                            listOf(
-                                Filter.ManufacturerData(
-                                    id = BleConstants.MANUFACTURER_COMPANY_ID,
-                                ),
-                            )
-                    }
-                }
-                scanSettings =
-                    ScanSettings
-                        .Builder()
-                        .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                        .build()
-                logging {
-                    identifier = KABLE_LOG_IDENTIFIER
-                    engine = FrameportKableLogEngine
-                    level = Logging.Level.Warnings
-                    format = Logging.Format.Compact
-                }
-            }
-
         /**
          * Cold flow of filtered BLE advertisements.
          *
@@ -61,7 +32,7 @@ internal class AndroidBleScanner
          */
         @SuppressLint("MissingPermission")
         override fun scan(): Flow<BleCameraAdvertisement> =
-            scanner.advertisements
+            advertisementSource.advertisements
                 .onStart { advertisementCache.clear() }
                 .map { advertisement ->
                     val id = advertisementCache.remember(advertisement)
@@ -76,8 +47,5 @@ internal class AndroidBleScanner
                         signalStrengthDbm = advertisement.rssi,
                     )
                 }
-
-        private companion object {
-            const val KABLE_LOG_IDENTIFIER = "Frameport BLE"
-        }
+                .catch { e -> throw e.asBleScanFailure() }
     }

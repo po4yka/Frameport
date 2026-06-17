@@ -60,4 +60,21 @@ internal fun Throwable.asBleConnectFailure(): Throwable =
         else -> BleTransportException.GattConnectionFailed(this)
     }
 
+internal fun Throwable.asBleScanFailure(): Throwable =
+    when {
+        this is BleTransportException -> this
+        this is SecurityException -> BleTransportException.PermissionDenied(
+            permission = BLUETOOTH_SCAN_PERMISSION,
+            cause = this,
+        )
+        message.orEmpty().contains("bluetooth disabled", ignoreCase = true) -> {
+            BleTransportException.BluetoothDisabled(this)
+        }
+        message.orEmpty().contains("bluetooth adapter is disabled", ignoreCase = true) -> {
+            BleTransportException.BluetoothDisabled(this)
+        }
+        else -> this
+    }
+
 private const val BLUETOOTH_CONNECT_PERMISSION = "android.permission.BLUETOOTH_CONNECT"
+private const val BLUETOOTH_SCAN_PERMISSION = "android.permission.BLUETOOTH_SCAN"

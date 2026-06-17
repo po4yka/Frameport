@@ -53,5 +53,9 @@ internal abstract class BluetoothModule {
 
     @Binds
     @Singleton
+    abstract fun bindKableAdvertisementSource(impl: DefaultKableAdvertisementSource): KableAdvertisementSource
+
+    @Binds
+    @Singleton
     abstract fun bindKablePeripheralFactory(impl: DefaultKablePeripheralFactory): KablePeripheralFactory
 }
