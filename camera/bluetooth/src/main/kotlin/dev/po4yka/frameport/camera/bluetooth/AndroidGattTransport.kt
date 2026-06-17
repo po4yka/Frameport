@@ -1,11 +1,5 @@
 package dev.po4yka.frameport.camera.bluetooth
 
-import com.juul.kable.Characteristic
-import com.juul.kable.PeripheralBuilder
-import com.juul.kable.State
-import com.juul.kable.WriteType
-import com.juul.kable.characteristicOf
-import com.juul.kable.logs.Logging
 import dev.po4yka.frameport.camera.api.BleCameraRef
 import dev.po4yka.frameport.camera.api.BleConnectionState
 import dev.po4yka.frameport.camera.api.CharacteristicId
@@ -19,8 +13,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.uuid.ExperimentalUuidApi
-import kotlin.uuid.Uuid
 
 /**
  * Kable-backed implementation of [GattTransport].
@@ -29,7 +21,7 @@ import kotlin.uuid.Uuid
  * This class adapts Kable Peripheral operations to Frameport's transport seam.
  */
 @Singleton
-@OptIn(ExperimentalCoroutinesApi::class, ExperimentalUuidApi::class)
+@OptIn(ExperimentalCoroutinesApi::class)
 internal class AndroidGattTransport
     @Inject
     constructor(
@@ -52,47 +44,39 @@ internal class AndroidGattTransport
             closePeripheral()
             val nextPeripheral =
                 if (advertisement != null) {
-                    peripheralFactory.create(advertisement, ::configurePeripheral)
+                    peripheralFactory.create(advertisement)
                 } else {
-                    peripheralFactory.create(camera.id, ::configurePeripheral)
+                    peripheralFactory.create(camera.id)
                 }
             peripheral = nextPeripheral
             _connectionState.value = BleConnectionState.Connecting
             nextPeripheral.connect()
             activePeripheralFlow.value = nextPeripheral
             _connectionState.value =
-                when (nextPeripheral.state.value) {
-                    is State.Connected -> BleConnectionState.Connected
-                    else -> BleConnectionState.Connected
+                if (nextPeripheral.isConnected) {
+                    BleConnectionState.Connected
+                } else {
+                    throw IllegalStateException("Kable connect completed without connected state")
                 }
         }
 
         override suspend fun discoverServices() {
-            val services =
-                activePeripheral()
-                    .services
-                    .value
-                    ?: throw IllegalStateException("Kable connect completed without discovered services")
-            Timber.d("BLE: services discovered count=${services.size}")
+            Timber.d("BLE: services discovered count=${activePeripheral().discoveredServiceCount()}")
         }
 
         override suspend fun requestMtu(mtu: Int): Int =
-            activePeripheral().maximumWriteValueLengthForType(WriteType.WithResponse) + ATT_MTU_HEADER_SIZE
+            activePeripheral().maximumWriteValueLengthWithResponse() + ATT_MTU_HEADER_SIZE
 
         override suspend fun readCharacteristic(characteristicId: CharacteristicId): ByteArray =
-            activePeripheral().let { currentPeripheral ->
-                currentPeripheral.read(characteristicFor(currentPeripheral, characteristicId))
-            }
+            activePeripheral().read(characteristicId)
 
         override suspend fun writeCharacteristic(
             characteristicId: CharacteristicId,
             payload: ByteArray,
         ) {
-            val currentPeripheral = activePeripheral()
-            currentPeripheral.write(
-                characteristic = characteristicFor(currentPeripheral, characteristicId),
-                data = payload,
-                writeType = WriteType.WithResponse,
+            activePeripheral().writeWithResponse(
+                characteristicId = characteristicId,
+                payload = payload,
             )
         }
 
@@ -106,43 +90,11 @@ internal class AndroidGattTransport
             activePeripheralFlow
                 .filterNotNull()
                 .flatMapLatest { currentPeripheral ->
-                    currentPeripheral.observe(characteristicFor(currentPeripheral, characteristicId))
+                    currentPeripheral.observe(characteristicId)
                 }
 
         private fun activePeripheral(): KablePeripheralAdapter =
             requireNotNull(peripheral) { "BLE peripheral is not connected" }
-
-        private fun configurePeripheral(builder: PeripheralBuilder) {
-            builder.autoConnectIf { false }
-            builder.onServicesDiscovered {
-                val negotiatedMtu = requestMtu(BleConstants.PREFERRED_MTU)
-                Timber.d("BLE: Kable negotiated MTU=$negotiatedMtu")
-            }
-            builder.logging {
-                identifier = KABLE_LOG_IDENTIFIER
-                engine = FrameportKableLogEngine
-                level = Logging.Level.Warnings
-                format = Logging.Format.Compact
-            }
-        }
-
-        private fun characteristicFor(
-            currentPeripheral: KablePeripheralAdapter,
-            characteristicId: CharacteristicId,
-        ): Characteristic {
-            val characteristicUuid = Uuid.parse(characteristicId.value)
-            val serviceUuid =
-                currentPeripheral
-                    .services
-                    .value
-                    ?.firstOrNull { service ->
-                        service.characteristics.any { it.characteristicUuid == characteristicUuid }
-                    }?.serviceUuid
-                    ?: throw IllegalStateException(
-                        "No service found for characteristic ${characteristicId.value}",
-                    )
-            return characteristicOf(serviceUuid, characteristicUuid)
-        }
 
         private suspend fun closePeripheral() {
             peripheral?.runCatching {
@@ -156,7 +108,6 @@ internal class AndroidGattTransport
         }
 
         private companion object {
-            const val KABLE_LOG_IDENTIFIER = "Frameport BLE"
             const val ATT_MTU_HEADER_SIZE = 3
         }
     }

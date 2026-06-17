@@ -1,17 +1,10 @@
 package dev.po4yka.frameport.camera.bluetooth
 
 import com.juul.kable.Advertisement
-import com.juul.kable.Characteristic
-import com.juul.kable.DiscoveredService
-import com.juul.kable.PeripheralBuilder
-import com.juul.kable.State
-import com.juul.kable.WriteType
 import dev.po4yka.frameport.camera.api.BleCameraRef
 import dev.po4yka.frameport.camera.api.BleConnectionState
-import kotlinx.coroutines.CoroutineScope
+import dev.po4yka.frameport.camera.api.CharacteristicId
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -21,7 +14,7 @@ class AndroidGattTransportSavedIdReconnectTest {
     @Test
     fun connectUsesSavedCameraIdWhenAdvertisementCacheMisses() =
         runTest {
-            val factory = RecordingKablePeripheralFactory(this)
+            val factory = RecordingKablePeripheralFactory()
             val transport =
                 AndroidGattTransport(
                     advertisementCache = KableAdvertisementCache(),
@@ -41,66 +34,55 @@ class AndroidGattTransportSavedIdReconnectTest {
             assertEquals(BleConnectionState.Connected, transport.connectionState.value)
         }
 
-    private class RecordingKablePeripheralFactory(
-        private val scope: CoroutineScope,
-    ) : KablePeripheralFactory {
+    private class RecordingKablePeripheralFactory : KablePeripheralFactory {
         val identifierCreates = mutableListOf<String>()
         var advertisementCreateCount = 0
         lateinit var lastPeripheral: RecordingKablePeripheralAdapter
 
-        override fun create(
-            advertisement: Advertisement,
-            configure: (PeripheralBuilder) -> Unit,
-        ): KablePeripheralAdapter {
+        override fun create(advertisement: Advertisement): KablePeripheralAdapter {
             advertisementCreateCount++
-            lastPeripheral = RecordingKablePeripheralAdapter(scope)
+            lastPeripheral = RecordingKablePeripheralAdapter()
             return lastPeripheral
         }
 
-        override fun create(
-            identifier: String,
-            configure: (PeripheralBuilder) -> Unit,
-        ): KablePeripheralAdapter {
+        override fun create(identifier: String): KablePeripheralAdapter {
             identifierCreates += identifier
-            lastPeripheral = RecordingKablePeripheralAdapter(scope)
+            lastPeripheral = RecordingKablePeripheralAdapter()
             return lastPeripheral
         }
     }
 
-    private class RecordingKablePeripheralAdapter(
-        private val scope: CoroutineScope,
-    ) : KablePeripheralAdapter {
-        private val _state = MutableStateFlow<State>(State.Disconnected())
-
-        override val state: StateFlow<State> = _state
-        override val services: StateFlow<List<DiscoveredService>?> = MutableStateFlow(emptyList())
+    private class RecordingKablePeripheralAdapter : KablePeripheralAdapter {
+        override var isConnected: Boolean = false
+            private set
 
         var connectCallCount = 0
 
         override suspend fun connect() {
             connectCallCount++
-            _state.value = State.Connected(scope)
+            isConnected = true
         }
 
         override suspend fun disconnect() {
-            _state.value = State.Disconnected()
+            isConnected = false
         }
 
         override fun close() = Unit
 
-        override suspend fun maximumWriteValueLengthForType(writeType: WriteType): Int =
+        override fun discoveredServiceCount(): Int = 0
+
+        override suspend fun maximumWriteValueLengthWithResponse(): Int =
             BleConstants.PREFERRED_MTU - 3
 
-        override suspend fun read(characteristic: Characteristic): ByteArray =
+        override suspend fun read(characteristicId: CharacteristicId): ByteArray =
             ByteArray(0)
 
-        override suspend fun write(
-            characteristic: Characteristic,
-            data: ByteArray,
-            writeType: WriteType,
+        override suspend fun writeWithResponse(
+            characteristicId: CharacteristicId,
+            payload: ByteArray,
         ) = Unit
 
-        override fun observe(characteristic: Characteristic): Flow<ByteArray> =
+        override fun observe(characteristicId: CharacteristicId): Flow<ByteArray> =
             emptyFlow()
     }
 }

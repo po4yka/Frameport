@@ -21,6 +21,13 @@ class KableAdvertisementCacheLifecycleTest {
         assertFalse(source.contains("advertisementCache.clear()"))
     }
 
+    @Test
+    fun gattTransportDoesNotImportKableDirectly() {
+        val source = source("AndroidGattTransport.kt")
+
+        assertFalse(source.contains("com.juul.kable"))
+    }
+
     private fun source(fileName: String): String =
         listOf(
             File("src/main/kotlin/dev/po4yka/frameport/camera/bluetooth/$fileName"),

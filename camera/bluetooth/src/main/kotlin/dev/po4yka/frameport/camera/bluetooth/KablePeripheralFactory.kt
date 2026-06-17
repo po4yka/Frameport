@@ -7,26 +7,25 @@ import com.juul.kable.Peripheral
 import com.juul.kable.PeripheralBuilder
 import com.juul.kable.State
 import com.juul.kable.WriteType
+import com.juul.kable.characteristicOf
+import com.juul.kable.logs.Logging
+import dev.po4yka.frameport.camera.api.CharacteristicId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 
 internal interface KablePeripheralFactory {
-    fun create(
-        advertisement: Advertisement,
-        configure: (PeripheralBuilder) -> Unit,
-    ): KablePeripheralAdapter
+    fun create(advertisement: Advertisement): KablePeripheralAdapter
 
-    fun create(
-        identifier: String,
-        configure: (PeripheralBuilder) -> Unit,
-    ): KablePeripheralAdapter
+    fun create(identifier: String): KablePeripheralAdapter
 }
 
 internal interface KablePeripheralAdapter {
-    val state: StateFlow<State>
-    val services: StateFlow<List<DiscoveredService>?>
+    val isConnected: Boolean
 
     suspend fun connect()
 
@@ -34,45 +33,62 @@ internal interface KablePeripheralAdapter {
 
     fun close()
 
-    suspend fun maximumWriteValueLengthForType(writeType: WriteType): Int
+    fun discoveredServiceCount(): Int
 
-    suspend fun read(characteristic: Characteristic): ByteArray
+    suspend fun maximumWriteValueLengthWithResponse(): Int
 
-    suspend fun write(
-        characteristic: Characteristic,
-        data: ByteArray,
-        writeType: WriteType,
+    suspend fun read(characteristicId: CharacteristicId): ByteArray
+
+    suspend fun writeWithResponse(
+        characteristicId: CharacteristicId,
+        payload: ByteArray,
     )
 
-    fun observe(characteristic: Characteristic): Flow<ByteArray>
+    fun observe(characteristicId: CharacteristicId): Flow<ByteArray>
 }
 
 @Singleton
 internal class DefaultKablePeripheralFactory
     @Inject
     constructor() : KablePeripheralFactory {
-        override fun create(
-            advertisement: Advertisement,
-            configure: (PeripheralBuilder) -> Unit,
-        ): KablePeripheralAdapter =
+        override fun create(advertisement: Advertisement): KablePeripheralAdapter =
             RealKablePeripheralAdapter(
-                Peripheral(advertisement, configure),
+                Peripheral(advertisement, ::configurePeripheral),
             )
 
-        override fun create(
-            identifier: String,
-            configure: (PeripheralBuilder) -> Unit,
-        ): KablePeripheralAdapter =
+        override fun create(identifier: String): KablePeripheralAdapter =
             RealKablePeripheralAdapter(
-                Peripheral(identifier, configure),
+                Peripheral(identifier, ::configurePeripheral),
             )
+
+        private fun configurePeripheral(builder: PeripheralBuilder) {
+            builder.autoConnectIf { false }
+            builder.onServicesDiscovered {
+                val negotiatedMtu = requestMtu(BleConstants.PREFERRED_MTU)
+                Timber.d("BLE: Kable negotiated MTU=$negotiatedMtu")
+            }
+            builder.logging {
+                identifier = KABLE_LOG_IDENTIFIER
+                engine = FrameportKableLogEngine
+                level = Logging.Level.Warnings
+                format = Logging.Format.Compact
+            }
+        }
+
+        private companion object {
+            const val KABLE_LOG_IDENTIFIER = "Frameport BLE"
+        }
     }
 
+@OptIn(ExperimentalUuidApi::class)
 private class RealKablePeripheralAdapter(
     private val peripheral: Peripheral,
 ) : KablePeripheralAdapter {
-    override val state: StateFlow<State> = peripheral.state
-    override val services: StateFlow<List<DiscoveredService>?> = peripheral.services
+    private val state: StateFlow<State> = peripheral.state
+    private val services: StateFlow<List<DiscoveredService>?> = peripheral.services
+
+    override val isConnected: Boolean
+        get() = state.value is State.Connected
 
     override suspend fun connect() {
         peripheral.connect()
@@ -86,24 +102,41 @@ private class RealKablePeripheralAdapter(
         peripheral.close()
     }
 
-    override suspend fun maximumWriteValueLengthForType(writeType: WriteType): Int =
-        peripheral.maximumWriteValueLengthForType(writeType)
+    override fun discoveredServiceCount(): Int =
+        requireNotNull(services.value) { "Kable connect completed without discovered services" }
+            .size
 
-    override suspend fun read(characteristic: Characteristic): ByteArray =
-        peripheral.read(characteristic)
+    override suspend fun maximumWriteValueLengthWithResponse(): Int =
+        peripheral.maximumWriteValueLengthForType(WriteType.WithResponse)
 
-    override suspend fun write(
-        characteristic: Characteristic,
-        data: ByteArray,
-        writeType: WriteType,
+    override suspend fun read(characteristicId: CharacteristicId): ByteArray =
+        peripheral.read(characteristicFor(characteristicId))
+
+    override suspend fun writeWithResponse(
+        characteristicId: CharacteristicId,
+        payload: ByteArray,
     ) {
         peripheral.write(
-            characteristic = characteristic,
-            data = data,
-            writeType = writeType,
+            characteristic = characteristicFor(characteristicId),
+            data = payload,
+            writeType = WriteType.WithResponse,
         )
     }
 
-    override fun observe(characteristic: Characteristic): Flow<ByteArray> =
-        peripheral.observe(characteristic)
+    override fun observe(characteristicId: CharacteristicId): Flow<ByteArray> =
+        peripheral.observe(characteristicFor(characteristicId))
+
+    private fun characteristicFor(characteristicId: CharacteristicId): Characteristic {
+        val characteristicUuid = Uuid.parse(characteristicId.value)
+        val serviceUuid =
+            services
+                .value
+                ?.firstOrNull { service ->
+                    service.characteristics.any { it.characteristicUuid == characteristicUuid }
+                }?.serviceUuid
+                ?: throw IllegalStateException(
+                    "No service found for characteristic ${characteristicId.value}",
+                )
+        return characteristicOf(serviceUuid, characteristicUuid)
+    }
 }
