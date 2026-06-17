@@ -22,11 +22,11 @@ class KableAdvertisementCacheLifecycleTest {
     }
 
     @Test
-    fun setNotificationCollectsKableObservationFlow() {
+    fun gattTransportFallsBackToSavedCameraIdWithoutCachedAdvertisement() {
         val source = source("AndroidGattTransport.kt")
 
-        assertTrue(source.contains(".observe(characteristic)"))
-        assertTrue(source.contains(".collect()"))
+        assertTrue(source.contains("advertisementCache.advertisementFor(camera.id)"))
+        assertTrue(source.contains("Peripheral(camera.id, ::configurePeripheral)"))
     }
 
     private fun source(fileName: String): String =

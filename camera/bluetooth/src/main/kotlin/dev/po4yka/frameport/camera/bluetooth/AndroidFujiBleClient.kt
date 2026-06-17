@@ -44,8 +44,8 @@ import kotlin.math.min
  *   loop dispatches to [gattTransport].
  * - Only ONE GATT operation is in flight at a time. The [operationQueue] channel (capacity 64)
  *   serializes all callers. The actor processes one [GattOperation] then moves to the next.
- * - EVERY GATT operation is wrapped in [withTimeout]. Connect uses [BleConstants.GATT_CONNECT_TIMEOUT_MS];
- *   characteristic read/write/notify use [BleConstants.GATT_OPERATION_TIMEOUT_MS].
+ * - EVERY actor-queued GATT operation is wrapped in [withTimeout]. Connect uses [BleConstants.GATT_CONNECT_TIMEOUT_MS];
+ *   characteristic read/write use [BleConstants.GATT_OPERATION_TIMEOUT_MS].
  * - [disconnect] is idempotent. Calling it multiple times is safe.
  * - On disconnect or failure, all pending operations in the queue are cancelled with
  *   [BleOperationCancelled].
@@ -301,7 +301,6 @@ class AndroidFujiBleClient
                 is GattOperation.Connect -> processConnect(operation)
                 is GattOperation.Read -> processRead(operation)
                 is GattOperation.Write -> processWrite(operation)
-                is GattOperation.SetNotify -> processSetNotify(operation)
                 is GattOperation.Disconnect -> processDisconnect()
             }
         }
@@ -378,22 +377,6 @@ class AndroidFujiBleClient
             }
         }
 
-        private suspend fun processSetNotify(op: GattOperation.SetNotify) {
-            try {
-                withTimeout(BleConstants.GATT_OPERATION_TIMEOUT_MS) {
-                    gattTransport.setNotification(op.characteristicId, op.enable)
-                }
-                Timber.d("BLE: setNotify characteristic=${op.characteristicId.value} enable=${op.enable}")
-                op.deferred.complete(Unit)
-            } catch (e: CancellationException) {
-                op.deferred.completeExceptionally(BleOperationCancelled("SetNotify cancelled"))
-                throw e
-            } catch (e: Exception) {
-                Timber.e("BLE: setNotify failed characteristic=${op.characteristicId.value}")
-                op.deferred.completeExceptionally(e)
-            }
-        }
-
         private suspend fun processDisconnect() {
             // Cancel anything that slipped into the queue behind the Disconnect signal.
             cancelPendingOperations()
@@ -435,12 +418,6 @@ class AndroidFujiBleClient
                         )
                     }
 
-                    is GattOperation.SetNotify -> {
-                        pending.deferred.completeExceptionally(
-                            BleOperationCancelled("Disconnected — operation cancelled"),
-                        )
-                    }
-
                     is GattOperation.Disconnect -> { /* already processing */ }
                 }
             }
@@ -460,7 +437,6 @@ class AndroidFujiBleClient
                         is GattOperation.Connect -> operation.deferred
                         is GattOperation.Read -> operation.deferred
                         is GattOperation.Write -> operation.deferred
-                        is GattOperation.SetNotify -> operation.deferred
                         is GattOperation.Disconnect -> null
                     }
                 pending?.completeExceptionally(

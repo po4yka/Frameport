@@ -24,7 +24,6 @@ import kotlinx.coroutines.yield
  * - [requestMtu] returns [BleConstants.PREFERRED_MTU].
  * - [readCharacteristic] returns [defaultReadResponse].
  * - [writeCharacteristic] succeeds and records the call.
- * - [setNotification] succeeds immediately.
  * - [disconnect] transitions state to Disconnected.
  */
 class FakeGattTransport : GattTransport {
@@ -126,14 +125,6 @@ class FakeGattTransport : GattTransport {
     ) {
         writeError?.let { throw it }
         writeCalls.add(characteristicId.value to payload)
-    }
-
-    // cancel-safe: no shared state mutated mid-operation; cancellation is safe.
-    override suspend fun setNotification(
-        characteristicId: CharacteristicId,
-        enable: Boolean,
-    ) {
-        // no-op in fake
     }
 
     // cancel-safe: idempotent; second call is a no-op.

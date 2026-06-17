@@ -46,17 +46,6 @@ internal sealed class GattOperation {
     }
 
     /**
-     * Enable (or disable) CCCD notifications for a characteristic.
-     * Requests notification setup when the transport supports an explicit subscription step.
-     * Completes with Unit on success.
-     */
-    data class SetNotify(
-        val characteristicId: CharacteristicId,
-        val enable: Boolean,
-        val deferred: CompletableDeferred<Unit>,
-    ) : GattOperation()
-
-    /**
      * Disconnect the GATT connection and cancel all pending operations.
      * Completes immediately (idempotent).
      */

@@ -6,7 +6,10 @@ import javax.inject.Singleton
 
 /**
  * Process-local bridge from Frameport's stable [dev.po4yka.frameport.camera.api.BleCameraRef.id]
- * to the Kable advertisement needed to create a Peripheral.
+ * to a Kable advertisement captured during scan.
+ *
+ * The cache is an optimization for scan-to-connect. Production reconnect must also work from
+ * a saved [dev.po4yka.frameport.camera.api.BleCameraRef.id] after this cache has been cleared.
  */
 @Singleton
 internal class KableAdvertisementCache

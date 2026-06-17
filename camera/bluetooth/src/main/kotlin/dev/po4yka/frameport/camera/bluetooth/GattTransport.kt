@@ -89,17 +89,6 @@ internal interface GattTransport {
     )
 
     /**
-     * Enable (or disable) notifications for [characteristicId] where the implementation supports an explicit subscription step.
-     *
-     * Must be called from the actor coroutine only.
-     * cancel-safe: descriptor write is atomic; cancellation mid-flight is safe.
-     */
-    suspend fun setNotification(
-        characteristicId: CharacteristicId,
-        enable: Boolean,
-    )
-
-    /**
      * Disconnect and close the GATT connection. Idempotent.
      * May be called from any coroutine context.
      *
