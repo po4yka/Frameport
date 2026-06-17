@@ -1,13 +1,11 @@
 package dev.po4yka.frameport.camera.bluetooth
 
 import com.juul.kable.Advertisement
-import com.juul.kable.Characteristic
 import com.juul.kable.DiscoveredService
 import com.juul.kable.Peripheral
 import com.juul.kable.PeripheralBuilder
 import com.juul.kable.State
 import com.juul.kable.WriteType
-import com.juul.kable.characteristicOf
 import com.juul.kable.logs.Logging
 import dev.po4yka.frameport.camera.api.CharacteristicId
 import kotlinx.coroutines.flow.Flow
@@ -15,8 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.uuid.ExperimentalUuidApi
-import kotlin.uuid.Uuid
 
 internal interface KablePeripheralFactory {
     fun create(advertisement: Advertisement): KablePeripheralAdapter
@@ -80,12 +76,15 @@ internal class DefaultKablePeripheralFactory
         }
     }
 
-@OptIn(ExperimentalUuidApi::class)
 private class RealKablePeripheralAdapter(
     private val peripheral: Peripheral,
 ) : KablePeripheralAdapter {
     private val state: StateFlow<State> = peripheral.state
     private val services: StateFlow<List<DiscoveredService>?> = peripheral.services
+    private val characteristicLookupCache =
+        KableCharacteristicLookupCache(
+            services = { services.value },
+        )
 
     override val isConnected: Boolean
         get() = state.value is State.Connected
@@ -126,17 +125,6 @@ private class RealKablePeripheralAdapter(
     override fun observe(characteristicId: CharacteristicId): Flow<ByteArray> =
         peripheral.observe(characteristicFor(characteristicId))
 
-    private fun characteristicFor(characteristicId: CharacteristicId): Characteristic {
-        val characteristicUuid = Uuid.parse(characteristicId.value)
-        val serviceUuid =
-            services
-                .value
-                ?.firstOrNull { service ->
-                    service.characteristics.any { it.characteristicUuid == characteristicUuid }
-                }?.serviceUuid
-                ?: throw IllegalStateException(
-                    "No service found for characteristic ${characteristicId.value}",
-                )
-        return characteristicOf(serviceUuid, characteristicUuid)
-    }
+    private fun characteristicFor(characteristicId: CharacteristicId) =
+        characteristicLookupCache.characteristicFor(characteristicId)
 }
