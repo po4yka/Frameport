@@ -51,13 +51,13 @@ internal class AndroidGattTransport
             peripheral = nextPeripheral
             _connectionState.value = BleConnectionState.Connecting
             nextPeripheral.connect()
+            if (!nextPeripheral.isConnected) {
+                closePeripheral()
+                _connectionState.value = BleConnectionState.Disconnected
+                throw IllegalStateException("Kable connect completed without connected state")
+            }
             activePeripheralFlow.value = nextPeripheral
-            _connectionState.value =
-                if (nextPeripheral.isConnected) {
-                    BleConnectionState.Connected
-                } else {
-                    throw IllegalStateException("Kable connect completed without connected state")
-                }
+            _connectionState.value = BleConnectionState.Connected
         }
 
         override suspend fun discoverServices() {

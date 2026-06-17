@@ -34,40 +34,80 @@ class AndroidGattTransportSavedIdReconnectTest {
             assertEquals(BleConnectionState.Connected, transport.connectionState.value)
         }
 
-    private class RecordingKablePeripheralFactory : KablePeripheralFactory {
+    @Test
+    fun connectFailsAndResetsStateWhenPeripheralDoesNotReachConnectedState() =
+        runTest {
+            val factory = RecordingKablePeripheralFactory(connectReportsConnected = false)
+            val transport =
+                AndroidGattTransport(
+                    advertisementCache = KableAdvertisementCache(),
+                    peripheralFactory = factory,
+                )
+
+            val result =
+                runCatching {
+                    transport.connect(
+                        BleCameraRef(
+                            id = "AA:BB:CC:DD:EE:FF",
+                            displayName = "X-T5",
+                        ),
+                    )
+                }
+
+            assertEquals(true, result.isFailure)
+            assertEquals(
+                "Kable connect completed without connected state",
+                result.exceptionOrNull()?.message,
+            )
+            assertEquals(BleConnectionState.Disconnected, transport.connectionState.value)
+            assertEquals(1, factory.lastPeripheral.connectCallCount)
+            assertEquals(1, factory.lastPeripheral.disconnectCallCount)
+            assertEquals(1, factory.lastPeripheral.closeCallCount)
+        }
+
+    private class RecordingKablePeripheralFactory(
+        private val connectReportsConnected: Boolean = true,
+    ) : KablePeripheralFactory {
         val identifierCreates = mutableListOf<String>()
         var advertisementCreateCount = 0
         lateinit var lastPeripheral: RecordingKablePeripheralAdapter
 
         override fun create(advertisement: Advertisement): KablePeripheralAdapter {
             advertisementCreateCount++
-            lastPeripheral = RecordingKablePeripheralAdapter()
+            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected)
             return lastPeripheral
         }
 
         override fun create(identifier: String): KablePeripheralAdapter {
             identifierCreates += identifier
-            lastPeripheral = RecordingKablePeripheralAdapter()
+            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected)
             return lastPeripheral
         }
     }
 
-    private class RecordingKablePeripheralAdapter : KablePeripheralAdapter {
+    private class RecordingKablePeripheralAdapter(
+        private val connectReportsConnected: Boolean,
+    ) : KablePeripheralAdapter {
         override var isConnected: Boolean = false
             private set
 
         var connectCallCount = 0
+        var disconnectCallCount = 0
+        var closeCallCount = 0
 
         override suspend fun connect() {
             connectCallCount++
-            isConnected = true
+            isConnected = connectReportsConnected
         }
 
         override suspend fun disconnect() {
+            disconnectCallCount++
             isConnected = false
         }
 
-        override fun close() = Unit
+        override fun close() {
+            closeCallCount++
+        }
 
         override fun discoveredServiceCount(): Int = 0
 
