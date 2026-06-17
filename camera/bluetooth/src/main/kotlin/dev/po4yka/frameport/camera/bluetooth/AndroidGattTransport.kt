@@ -50,11 +50,17 @@ internal class AndroidGattTransport
                 }
             peripheral = nextPeripheral
             _connectionState.value = BleConnectionState.Connecting
-            nextPeripheral.connect()
+            runCatching {
+                nextPeripheral.connect()
+            }.onFailure { e ->
+                closePeripheral()
+                _connectionState.value = BleConnectionState.Disconnected
+                throw e.asBleConnectFailure()
+            }
             if (!nextPeripheral.isConnected) {
                 closePeripheral()
                 _connectionState.value = BleConnectionState.Disconnected
-                throw IllegalStateException("Kable connect completed without connected state")
+                throw BleTransportException.GattConnectionFailed()
             }
             activePeripheralFlow.value = nextPeripheral
             _connectionState.value = BleConnectionState.Connected

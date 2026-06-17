@@ -21,9 +21,7 @@ internal class KableCharacteristicLookupCache(
                     ?.firstOrNull { service ->
                         service.characteristics.any { it.characteristicUuid == characteristicUuid }
                     }?.serviceUuid
-                    ?: throw IllegalStateException(
-                        "No service found for characteristic ${characteristicId.value}",
-                    )
+                    ?: throw BleTransportException.ServiceNotFound(characteristicId)
             characteristicOf(serviceUuid, characteristicUuid)
         }
 }

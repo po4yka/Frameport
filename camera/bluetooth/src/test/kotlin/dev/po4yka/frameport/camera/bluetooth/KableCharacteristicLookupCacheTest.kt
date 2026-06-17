@@ -57,9 +57,18 @@ class KableCharacteristicLookupCacheTest {
         val characteristicId = CharacteristicId(BleConstants.CHR_CAMERA_SSID_NAME_STRING)
 
         repeat(2) {
-            runCatching {
-                cache.characteristicFor(characteristicId)
-            }
+            val result =
+                runCatching {
+                    cache.characteristicFor(characteristicId)
+                }
+            assertEquals(
+                BleTransportException.ServiceNotFound::class,
+                result.exceptionOrNull()!!::class,
+            )
+            assertEquals(
+                characteristicId,
+                (result.exceptionOrNull() as BleTransportException.ServiceNotFound).characteristicId,
+            )
         }
 
         assertEquals(2, serviceProviderCalls)

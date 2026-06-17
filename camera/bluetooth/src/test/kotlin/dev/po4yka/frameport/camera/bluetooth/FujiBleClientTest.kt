@@ -283,6 +283,18 @@ class FujiBleClientTest {
         }
 
     @Test
+    fun connectFailureReturnsTypedGattConnectionFailure() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.connectError = IllegalStateException("GATT connect refused")
+
+            val result = client.connect(camera)
+            advanceUntilIdle()
+
+            assertTrue(result.exceptionOrNull() is BleTransportException.GattConnectionFailed)
+        }
+
+    @Test
     fun readReturnsCharacteristicPayload() =
         testScope.runTest {
             val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
@@ -298,6 +310,48 @@ class FujiBleClientTest {
 
             assertTrue(result.isSuccess)
             assertArrayEquals(expectedBytes, result.getOrNull())
+        }
+
+    @Test
+    fun readFailureReturnsTypedCharacteristicFailure() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.mutableConnectionState.value = BleConnectionState.Connected
+            client.connect(camera)
+            advanceUntilIdle()
+
+            val characteristicId = CharacteristicId(BleConstants.CHR_CAMERA_SSID_NAME_STRING)
+            fakeGattTransport.readError = IllegalStateException("raw gatt read failed")
+
+            val result = client.read(characteristicId)
+            advanceUntilIdle()
+
+            val error = result.exceptionOrNull()
+            assertTrue(error is BleTransportException.CharacteristicOperationFailed)
+            error as BleTransportException.CharacteristicOperationFailed
+            assertEquals(characteristicId, error.characteristicId)
+            assertEquals(BleTransportException.Operation.Read, error.operation)
+        }
+
+    @Test
+    fun readTimeoutReturnsTypedCharacteristicTimeout() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.mutableConnectionState.value = BleConnectionState.Connected
+            client.connect(camera)
+            advanceUntilIdle()
+
+            val characteristicId = CharacteristicId(BleConstants.CHR_CAMERA_SSID_NAME_STRING)
+            fakeGattTransport.readDelayMs = BleConstants.GATT_OPERATION_TIMEOUT_MS + 1
+
+            val result = client.read(characteristicId)
+            advanceUntilIdle()
+
+            val error = result.exceptionOrNull()
+            assertTrue(error is BleTransportException.CharacteristicTimeout)
+            error as BleTransportException.CharacteristicTimeout
+            assertEquals(characteristicId, error.characteristicId)
+            assertEquals(BleTransportException.Operation.Read, error.operation)
         }
 
     @Test
@@ -320,6 +374,48 @@ class FujiBleClientTest {
                     uuid == characteristicId.value && bytes.contentEquals(payload)
                 },
             )
+        }
+
+    @Test
+    fun writeFailureReturnsTypedCharacteristicFailure() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.mutableConnectionState.value = BleConnectionState.Connected
+            client.connect(camera)
+            advanceUntilIdle()
+
+            val characteristicId = CharacteristicId(BleConstants.CHR_PAIRING_KEY)
+            fakeGattTransport.writeError = IllegalStateException("raw gatt write failed")
+
+            val result = client.write(characteristicId, byteArrayOf(0x01))
+            advanceUntilIdle()
+
+            val error = result.exceptionOrNull()
+            assertTrue(error is BleTransportException.CharacteristicOperationFailed)
+            error as BleTransportException.CharacteristicOperationFailed
+            assertEquals(characteristicId, error.characteristicId)
+            assertEquals(BleTransportException.Operation.Write, error.operation)
+        }
+
+    @Test
+    fun writeTimeoutReturnsTypedCharacteristicTimeout() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.mutableConnectionState.value = BleConnectionState.Connected
+            client.connect(camera)
+            advanceUntilIdle()
+
+            val characteristicId = CharacteristicId(BleConstants.CHR_PAIRING_KEY)
+            fakeGattTransport.writeDelayMs = BleConstants.GATT_OPERATION_TIMEOUT_MS + 1
+
+            val result = client.write(characteristicId, byteArrayOf(0x01))
+            advanceUntilIdle()
+
+            val error = result.exceptionOrNull()
+            assertTrue(error is BleTransportException.CharacteristicTimeout)
+            error as BleTransportException.CharacteristicTimeout
+            assertEquals(characteristicId, error.characteristicId)
+            assertEquals(BleTransportException.Operation.Write, error.operation)
         }
 
     @Test

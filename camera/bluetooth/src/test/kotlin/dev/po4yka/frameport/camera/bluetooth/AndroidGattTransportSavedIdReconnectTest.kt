@@ -55,10 +55,7 @@ class AndroidGattTransportSavedIdReconnectTest {
                 }
 
             assertEquals(true, result.isFailure)
-            assertEquals(
-                "Kable connect completed without connected state",
-                result.exceptionOrNull()?.message,
-            )
+            assertEquals(BleTransportException.GattConnectionFailed::class, result.exceptionOrNull()!!::class)
             assertEquals(BleConnectionState.Disconnected, transport.connectionState.value)
             assertEquals(1, factory.lastPeripheral.connectCallCount)
             assertEquals(1, factory.lastPeripheral.disconnectCallCount)

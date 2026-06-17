@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import timber.log.Timber
 import java.util.concurrent.atomic.AtomicBoolean
@@ -320,16 +321,34 @@ class AndroidFujiBleClient
                     _connectionState.value = BleConnectionState.Connected
                     op.deferred.complete(Unit)
                     return
+                } catch (e: TimeoutCancellationException) {
+                    attempt++
+                    val failure = BleTransportException.GattConnectionFailed(e)
+                    if (attempt > BleConstants.RECONNECT_MAX_ATTEMPTS) {
+                        Timber.e("BLE: connect failed after $attempt attempts")
+                        _connectionState.value = BleConnectionState.Failed
+                        op.deferred.completeExceptionally(failure)
+                        cancelPendingOperations()
+                        return
+                    }
+                    val backoffMs =
+                        min(
+                            BleConstants.RECONNECT_BASE_DELAY_MS * (1L shl (attempt - 1)),
+                            MAX_RECONNECT_DELAY_MS,
+                        )
+                    Timber.d("BLE: connect attempt $attempt failed, retrying in ${backoffMs}ms")
+                    delay(backoffMs)
                 } catch (e: CancellationException) {
                     // Caller cancelled or actor is shutting down — propagate, don't retry.
                     op.deferred.completeExceptionally(BleOperationCancelled("Connect cancelled"))
                     throw e
                 } catch (e: Exception) {
                     attempt++
+                    val failure = e.asBleConnectFailure()
                     if (attempt > BleConstants.RECONNECT_MAX_ATTEMPTS) {
                         Timber.e("BLE: connect failed after $attempt attempts")
                         _connectionState.value = BleConnectionState.Failed
-                        op.deferred.completeExceptionally(e)
+                        op.deferred.completeExceptionally(failure)
                         cancelPendingOperations()
                         return
                     }
@@ -353,12 +372,25 @@ class AndroidFujiBleClient
                 // Privacy: bytes are never logged.
                 Timber.d("BLE: read characteristic=${op.characteristicId.value} length=${bytes.size}")
                 op.deferred.complete(bytes)
+            } catch (e: TimeoutCancellationException) {
+                op.deferred.completeExceptionally(
+                    BleTransportException.CharacteristicTimeout(
+                        characteristicId = op.characteristicId,
+                        operation = BleTransportException.Operation.Read,
+                        cause = e,
+                    ),
+                )
             } catch (e: CancellationException) {
                 op.deferred.completeExceptionally(BleOperationCancelled("Read cancelled"))
                 throw e
             } catch (e: Exception) {
                 Timber.e("BLE: read failed characteristic=${op.characteristicId.value}")
-                op.deferred.completeExceptionally(e)
+                op.deferred.completeExceptionally(
+                    e.asCharacteristicFailure(
+                        characteristicId = op.characteristicId,
+                        operation = BleTransportException.Operation.Read,
+                    ),
+                )
             }
         }
 
@@ -370,12 +402,25 @@ class AndroidFujiBleClient
                 }
                 Timber.d("BLE: write characteristic=${op.characteristicId.value} length=${op.payload.size}")
                 op.deferred.complete(Unit)
+            } catch (e: TimeoutCancellationException) {
+                op.deferred.completeExceptionally(
+                    BleTransportException.CharacteristicTimeout(
+                        characteristicId = op.characteristicId,
+                        operation = BleTransportException.Operation.Write,
+                        cause = e,
+                    ),
+                )
             } catch (e: CancellationException) {
                 op.deferred.completeExceptionally(BleOperationCancelled("Write cancelled"))
                 throw e
             } catch (e: Exception) {
                 Timber.e("BLE: write failed characteristic=${op.characteristicId.value}")
-                op.deferred.completeExceptionally(e)
+                op.deferred.completeExceptionally(
+                    e.asCharacteristicFailure(
+                        characteristicId = op.characteristicId,
+                        operation = BleTransportException.Operation.Write,
+                    ),
+                )
             }
         }
 
@@ -462,3 +507,17 @@ class AndroidFujiBleClient
 class BleOperationCancelled(
     message: String,
 ) : Exception(message)
+
+private fun Throwable.asCharacteristicFailure(
+    characteristicId: CharacteristicId,
+    operation: BleTransportException.Operation,
+): Throwable =
+    when (this) {
+        is BleTransportException -> this
+        else ->
+            BleTransportException.CharacteristicOperationFailed(
+                characteristicId = characteristicId,
+                operation = operation,
+                cause = this,
+            )
+    }

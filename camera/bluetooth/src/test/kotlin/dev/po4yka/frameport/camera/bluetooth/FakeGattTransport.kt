@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.yield
 
 /**
@@ -42,6 +43,9 @@ class FakeGattTransport : GattTransport {
 
     /** Override to make [writeCharacteristic] throw the given exception. */
     var writeError: Exception? = null
+
+    var readDelayMs: Long = 0L
+    var writeDelayMs: Long = 0L
 
     /** Default bytes returned from [readCharacteristic] (if no [readError]). */
     var defaultReadResponse: ByteArray = byteArrayOf(0x01, 0x02)
@@ -106,6 +110,7 @@ class FakeGattTransport : GattTransport {
     // cancel-safe: read is side-effect-free on fake; cancellation is safe.
     override suspend fun readCharacteristic(characteristicId: CharacteristicId): ByteArray {
         readError?.let { throw it }
+        if (readDelayMs > 0L) delay(readDelayMs)
         currentConcurrentReads++
         if (currentConcurrentReads > maxConcurrentReads) maxConcurrentReads = currentConcurrentReads
         try {
@@ -124,6 +129,7 @@ class FakeGattTransport : GattTransport {
         payload: ByteArray,
     ) {
         writeError?.let { throw it }
+        if (writeDelayMs > 0L) delay(writeDelayMs)
         writeCalls.add(characteristicId.value to payload)
     }
 
@@ -160,6 +166,8 @@ class FakeGattTransport : GattTransport {
         readError = null
         writeError = null
         writeCalls.clear()
+        readDelayMs = 0L
+        writeDelayMs = 0L
         connectCallCount = 0
         discoverServicesCallCount = 0
         disconnectCallCount = 0
