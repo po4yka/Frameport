@@ -16,9 +16,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -65,6 +65,11 @@ class MediaStoreWriterImpl
         private val importCatalog: ImportCatalog,
         private val formatMapper: FujiFormatMimeMapper,
         private val gateway: MediaStoreGateway,
+        /**
+         * Injectable clock for deterministic date calculation in tests (Low finding).
+         * Production binding: [Clock.systemUTC] — provided by [MediaModule].
+         */
+        private val clock: Clock,
     ) : MediaStoreWriter {
         // NOT cancel-safe: writes to outputFd; partial writes are not rolled back. The pending row
         // is deleted on cancellation/failure via try/finally + NonCancellable, but bytes already
@@ -158,9 +163,14 @@ class MediaStoreWriterImpl
 
                 // Phase B — success finalization. pfd is already closed by the finally block above.
                 // MediaStore requires the write fd to be closed before IS_PENDING transitions to 0.
+                //
+                // Wrapped in NonCancellable so that a cancellation arriving between Phase A completing
+                // and the finalize call cannot leave IS_PENDING=1 stuck in MediaStore forever (Low
+                // finding). The deletePending fallback is likewise NonCancellable for the same reason.
 
                 // Step 8a (ADR-0004): finalize the pending item.
-                if (!gateway.finalizePending(uri)) {
+                val finalized = withContext(NonCancellable) { gateway.finalizePending(uri) }
+                if (!finalized) {
                     withContext(NonCancellable) { gateway.deletePending(uri) }
                     emit(ImportState.Failed(FrameportError.Unknown("MediaStore finalize failed")))
                     return@flow
@@ -198,7 +208,7 @@ class MediaStoreWriterImpl
          * Privacy: encodes only the app label and current date — no camera serial, IP, or user data.
          */
         private fun buildRelativePath(mediaCategory: MediaCategory): String {
-            val today = LocalDate.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_LOCAL_DATE)
+            val today = LocalDate.now(clock).format(DateTimeFormatter.ISO_LOCAL_DATE)
             val root =
                 when (mediaCategory) {
                     MediaCategory.Video -> "Movies"

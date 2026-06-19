@@ -6,6 +6,7 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -51,9 +52,22 @@ class AndroidMediaStoreGateway
 
         // NOT cancel-safe: ContentResolver.openFileDescriptor is blocking.
         override fun openWriteFd(uri: String): ParcelFileDescriptor? =
-            runCatching {
+            try {
                 contentResolver.openFileDescriptor(android.net.Uri.parse(uri), "w")
-            }.getOrNull()
+            } catch (e: SecurityException) {
+                // SecurityException indicates a revoked URI permission — a distinct, actionable
+                // error category (e.g. IS_PENDING row was externally deleted, or the app lost
+                // MediaStore write permission). Rethrow so the caller can map it to a typed
+                // FrameportError rather than silently swallowing it as a null return (Low finding).
+                Timber.tag("MediaStoreGateway").d("openWriteFd: SecurityException opening uri")
+                throw e
+            } catch (e: Exception) {
+                // Any other failure (FileNotFoundException, IllegalArgumentException, etc.)
+                // is treated as a transient/soft failure; return null so the caller emits
+                // ImportState.Failed via the existing null-check path.
+                Timber.tag("MediaStoreGateway").d("openWriteFd: %s", e.javaClass.simpleName)
+                null
+            }
 
         // NOT cancel-safe: ContentResolver.update is blocking.
         override fun finalizePending(uri: String): Boolean {

@@ -28,6 +28,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 
 /**
  * Unit tests for [MediaStoreWriterImpl].
@@ -41,6 +44,10 @@ class MediaStoreWriterImplTest {
     private val handle = CameraObjectHandle(12345678L)
     private val transferId = TransferId(handle.value)
     private val stubProgress = TransferProgress(transferId, 0L, 0L)
+
+    // Fixed clock pinned to 2024-03-15T12:00:00Z for deterministic date assertions.
+    private val fixedClock: Clock =
+        Clock.fixed(Instant.parse("2024-03-15T12:00:00Z"), ZoneOffset.UTC)
 
     private lateinit var fakeGateway: FakeMediaStoreGateway
     private lateinit var mockSdk: FujiNativeSdk
@@ -59,6 +66,7 @@ class MediaStoreWriterImplTest {
                 importCatalog = mockCatalog,
                 formatMapper = FujiFormatMimeMapper(),
                 gateway = fakeGateway,
+                clock = fixedClock,
             )
     }
 
@@ -235,6 +243,25 @@ class MediaStoreWriterImplTest {
                 assertEquals(String::class, imported.localUri::class)
                 awaitComplete()
             }
+        }
+
+    @Test
+    fun `RELATIVE_PATH date segment matches the injected clock not wall clock`() =
+        runTest {
+            // The fixed clock is pinned to 2024-03-15. Verify the path encodes exactly that date
+            // regardless of when the test runs — proving Clock injection is used (Low finding).
+            every { mockSdk.downloadObjectToFd(sessionId, handle, any()) } returns flowOf(stubProgress)
+
+            writer.importToMediaStore(sessionId, handle, CameraMediaFormat.Jpeg).test {
+                awaitItem() // Running
+                awaitItem() // Imported
+                awaitComplete()
+            }
+
+            assertTrue(
+                "RELATIVE_PATH must end with the fixed-clock date 2024-03-15, got: ${fakeGateway.lastRelativePath}",
+                fakeGateway.lastRelativePath.endsWith("2024-03-15"),
+            )
         }
 
     // ─── Cancellation ──────────────────────────────────────────────────────

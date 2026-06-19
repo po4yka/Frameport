@@ -37,6 +37,7 @@ dependencies {
     implementation(projects.core.storage)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.hilt.android)
+    implementation(libs.timber)
     ksp(libs.androidx.hilt.compiler)
 
     testImplementation(libs.junit)
