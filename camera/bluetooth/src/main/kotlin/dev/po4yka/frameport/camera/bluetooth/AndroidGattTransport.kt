@@ -67,7 +67,17 @@ internal class AndroidGattTransport
         }
 
         override suspend fun discoverServices() {
-            Timber.d("BLE: services discovered count=${activePeripheral().discoveredServiceCount()}")
+            val peripheral = activePeripheral()
+            val discoveredUuids =
+                peripheral.discoveredServiceUuids()
+                    ?: throw BleTransportException.GattConnectionFailed()
+            val count = discoveredUuids.size
+            Timber.d("BLE: services discovered count=$count")
+            REQUIRED_SERVICE_UUIDS.forEach { required ->
+                if (!discoveredUuids.contains(required)) {
+                    throw BleTransportException.RequiredServiceMissing(required)
+                }
+            }
         }
 
         override suspend fun requestMtu(mtu: Int): Int =
@@ -114,5 +124,17 @@ internal class AndroidGattTransport
 
         private companion object {
             const val ATT_MTU_HEADER_SIZE = 3
+
+            /**
+             * Minimum set of Fujifilm GATT service UUIDs that must be present after service
+             * discovery before the connection is declared usable. A missing service means the
+             * peer is not a Fujifilm camera or the connection is incomplete.
+             * UUIDs are lowercase to match [KablePeripheralAdapter.discoveredServiceUuids] output.
+             */
+            val REQUIRED_SERVICE_UUIDS: List<String> =
+                listOf(
+                    BleConstants.SERVICE_CAMERA_INFORMATION,
+                    BleConstants.SERVICE_CONNECTED_DEVICE_INFORMATION,
+                )
         }
     }

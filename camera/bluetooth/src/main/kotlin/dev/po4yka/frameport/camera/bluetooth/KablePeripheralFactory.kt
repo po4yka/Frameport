@@ -31,6 +31,9 @@ internal interface KablePeripheralAdapter {
 
     fun discoveredServiceCount(): Int
 
+    /** Returns the list of discovered GATT service UUIDs as lowercase strings, or null if not yet discovered. */
+    fun discoveredServiceUuids(): List<String>?
+
     suspend fun maximumWriteValueLengthWithResponse(): Int
 
     suspend fun read(characteristicId: CharacteristicId): ByteArray
@@ -104,6 +107,9 @@ private class RealKablePeripheralAdapter(
     override fun discoveredServiceCount(): Int =
         requireNotNull(services.value) { "Kable connect completed without discovered services" }
             .size
+
+    @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
+    override fun discoveredServiceUuids(): List<String>? = services.value?.map { it.serviceUuid.toString().lowercase() }
 
     override suspend fun maximumWriteValueLengthWithResponse(): Int =
         peripheral.maximumWriteValueLengthForType(WriteType.WithResponse)

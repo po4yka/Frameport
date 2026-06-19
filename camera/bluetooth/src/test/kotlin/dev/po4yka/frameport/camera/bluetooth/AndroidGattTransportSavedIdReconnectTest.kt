@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidGattTransportSavedIdReconnectTest {
@@ -120,9 +121,60 @@ class AndroidGattTransportSavedIdReconnectTest {
             assertEquals(1, factory.lastPeripheral.closeCallCount)
         }
 
+    /**
+     * M-22: discoverServices() must throw [BleTransportException.RequiredServiceMissing] when a
+     * required Fujifilm GATT service UUID is absent from the discovered service table.
+     */
+    @Test
+    fun discoverServicesThrowsRequiredServiceMissingWhenFujiServiceAbsent() =
+        runTest {
+            // Peripheral returns a non-Fujifilm service only — missing both required UUIDs.
+            val factory =
+                RecordingKablePeripheralFactory(
+                    serviceUuids = listOf("0000180a-0000-1000-8000-00805f9b34fb"),
+                )
+            val transport =
+                AndroidGattTransport(
+                    advertisementCache = KableAdvertisementCache(),
+                    peripheralFactory = factory,
+                )
+            transport.connect(BleCameraRef(id = "AA:BB:CC:DD:EE:FF", displayName = "X-T5"))
+
+            val result =
+                runCatching {
+                    transport.discoverServices()
+                }
+
+            assertTrue(result.isFailure)
+            assertTrue(
+                "Expected RequiredServiceMissing but got ${result.exceptionOrNull()?.javaClass?.simpleName}",
+                result.exceptionOrNull() is BleTransportException.RequiredServiceMissing,
+            )
+        }
+
+    @Test
+    fun discoverServicesSucceedsWhenAllRequiredServicesPresent() =
+        runTest {
+            val factory = RecordingKablePeripheralFactory()
+            val transport =
+                AndroidGattTransport(
+                    advertisementCache = KableAdvertisementCache(),
+                    peripheralFactory = factory,
+                )
+            transport.connect(BleCameraRef(id = "AA:BB:CC:DD:EE:FF", displayName = "X-T5"))
+
+            // Should not throw — all required UUIDs are present in the factory default.
+            transport.discoverServices()
+        }
+
     private class RecordingKablePeripheralFactory(
         private val connectReportsConnected: Boolean = true,
         private val connectFailure: Throwable? = null,
+        private val serviceUuids: List<String>? =
+            listOf(
+                BleConstants.SERVICE_CAMERA_INFORMATION,
+                BleConstants.SERVICE_CONNECTED_DEVICE_INFORMATION,
+            ),
     ) : KablePeripheralFactory {
         val identifierCreates = mutableListOf<String>()
         var advertisementCreateCount = 0
@@ -130,13 +182,13 @@ class AndroidGattTransportSavedIdReconnectTest {
 
         override fun create(advertisement: Advertisement): KablePeripheralAdapter {
             advertisementCreateCount++
-            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected, connectFailure)
+            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected, connectFailure, serviceUuids)
             return lastPeripheral
         }
 
         override fun create(identifier: String): KablePeripheralAdapter {
             identifierCreates += identifier
-            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected, connectFailure)
+            lastPeripheral = RecordingKablePeripheralAdapter(connectReportsConnected, connectFailure, serviceUuids)
             return lastPeripheral
         }
     }
@@ -144,6 +196,11 @@ class AndroidGattTransportSavedIdReconnectTest {
     private class RecordingKablePeripheralAdapter(
         private val connectReportsConnected: Boolean,
         private val connectFailure: Throwable?,
+        private val serviceUuids: List<String>? =
+            listOf(
+                BleConstants.SERVICE_CAMERA_INFORMATION,
+                BleConstants.SERVICE_CONNECTED_DEVICE_INFORMATION,
+            ),
     ) : KablePeripheralAdapter {
         override var isConnected: Boolean = false
             private set
@@ -167,20 +224,19 @@ class AndroidGattTransportSavedIdReconnectTest {
             closeCallCount++
         }
 
-        override fun discoveredServiceCount(): Int = 0
+        override fun discoveredServiceCount(): Int = serviceUuids?.size ?: 0
 
-        override suspend fun maximumWriteValueLengthWithResponse(): Int =
-            BleConstants.PREFERRED_MTU - 3
+        override fun discoveredServiceUuids(): List<String>? = serviceUuids
 
-        override suspend fun read(characteristicId: CharacteristicId): ByteArray =
-            ByteArray(0)
+        override suspend fun maximumWriteValueLengthWithResponse(): Int = BleConstants.PREFERRED_MTU - 3
+
+        override suspend fun read(characteristicId: CharacteristicId): ByteArray = ByteArray(0)
 
         override suspend fun writeWithResponse(
             characteristicId: CharacteristicId,
             payload: ByteArray,
         ) = Unit
 
-        override fun observe(characteristicId: CharacteristicId): Flow<ByteArray> =
-            emptyFlow()
+        override fun observe(characteristicId: CharacteristicId): Flow<ByteArray> = emptyFlow()
     }
 }

@@ -144,11 +144,9 @@ class AndroidGattTransportNotificationLifecycleTest {
     private class RecordingKablePeripheralFactory : KablePeripheralFactory {
         val createdAdapters = mutableListOf<RecordingKablePeripheralAdapter>()
 
-        override fun create(advertisement: Advertisement): KablePeripheralAdapter =
-            createAdapter()
+        override fun create(advertisement: Advertisement): KablePeripheralAdapter = createAdapter()
 
-        override fun create(identifier: String): KablePeripheralAdapter =
-            createAdapter()
+        override fun create(identifier: String): KablePeripheralAdapter = createAdapter()
 
         private fun createAdapter(): RecordingKablePeripheralAdapter =
             RecordingKablePeripheralAdapter()
@@ -175,13 +173,19 @@ class AndroidGattTransportNotificationLifecycleTest {
 
         override fun close() = Unit
 
-        override fun discoveredServiceCount(): Int = 0
+        private val serviceUuids =
+            listOf(
+                BleConstants.SERVICE_CAMERA_INFORMATION,
+                BleConstants.SERVICE_CONNECTED_DEVICE_INFORMATION,
+            )
 
-        override suspend fun maximumWriteValueLengthWithResponse(): Int =
-            BleConstants.PREFERRED_MTU - 3
+        override fun discoveredServiceCount(): Int = serviceUuids.size
 
-        override suspend fun read(characteristicId: CharacteristicId): ByteArray =
-            ByteArray(0)
+        override fun discoveredServiceUuids(): List<String> = serviceUuids
+
+        override suspend fun maximumWriteValueLengthWithResponse(): Int = BleConstants.PREFERRED_MTU - 3
+
+        override suspend fun read(characteristicId: CharacteristicId): ByteArray = ByteArray(0)
 
         override suspend fun writeWithResponse(
             characteristicId: CharacteristicId,

@@ -23,11 +23,18 @@ internal sealed class BleTransportException(
         val characteristicId: CharacteristicId,
     ) : BleTransportException("No BLE service found for characteristic ${characteristicId.value}")
 
+    class RequiredServiceMissing(
+        val serviceUuid: String,
+    ) : BleTransportException("Required Fujifilm GATT service not found: $serviceUuid")
+
     class CharacteristicTimeout(
         val characteristicId: CharacteristicId,
         val operation: Operation,
         cause: Throwable? = null,
-    ) : BleTransportException("Bluetooth characteristic ${operation.label} timed out for ${characteristicId.value}", cause)
+    ) : BleTransportException(
+            "Bluetooth characteristic ${operation.label} timed out for ${characteristicId.value}",
+            cause,
+        )
 
     class CharacteristicOperationFailed(
         val characteristicId: CharacteristicId,
@@ -46,34 +53,54 @@ internal sealed class BleTransportException(
 
 internal fun Throwable.asBleConnectFailure(): Throwable =
     when {
-        this is BleTransportException -> this
-        this is SecurityException -> BleTransportException.PermissionDenied(
-            permission = BLUETOOTH_CONNECT_PERMISSION,
-            cause = this,
-        )
+        this is BleTransportException -> {
+            this
+        }
+
+        this is SecurityException -> {
+            BleTransportException.PermissionDenied(
+                permission = BLUETOOTH_CONNECT_PERMISSION,
+                cause = this,
+            )
+        }
+
         message.orEmpty().contains("bluetooth disabled", ignoreCase = true) -> {
             BleTransportException.BluetoothDisabled(this)
         }
+
         message.orEmpty().contains("bluetooth adapter is disabled", ignoreCase = true) -> {
             BleTransportException.BluetoothDisabled(this)
         }
-        else -> BleTransportException.GattConnectionFailed(this)
+
+        else -> {
+            BleTransportException.GattConnectionFailed(this)
+        }
     }
 
 internal fun Throwable.asBleScanFailure(): Throwable =
     when {
-        this is BleTransportException -> this
-        this is SecurityException -> BleTransportException.PermissionDenied(
-            permission = BLUETOOTH_SCAN_PERMISSION,
-            cause = this,
-        )
+        this is BleTransportException -> {
+            this
+        }
+
+        this is SecurityException -> {
+            BleTransportException.PermissionDenied(
+                permission = BLUETOOTH_SCAN_PERMISSION,
+                cause = this,
+            )
+        }
+
         message.orEmpty().contains("bluetooth disabled", ignoreCase = true) -> {
             BleTransportException.BluetoothDisabled(this)
         }
+
         message.orEmpty().contains("bluetooth adapter is disabled", ignoreCase = true) -> {
             BleTransportException.BluetoothDisabled(this)
         }
-        else -> this
+
+        else -> {
+            this
+        }
     }
 
 private const val BLUETOOTH_CONNECT_PERMISSION = "android.permission.BLUETOOTH_CONNECT"
