@@ -41,7 +41,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-use fuji_ptp::constants::{FUJI_PTPIP_VERSION, opcode};
+use fuji_ptp::constants::{FUJI_PTPIP_VERSION, GOODBYE_PACKET, opcode};
 use fuji_ptp::{PtpIpPacket, decode_packet, encode_packet};
 
 use crate::builder::ServerConfig;
@@ -54,6 +54,13 @@ use crate::error::SimError;
 const PTPIP_TYPE_START_DATA: u32 = 0x0000_0009;
 const PTPIP_TYPE_END_DATA: u32 = 0x0000_000C;
 const PTPIP_TYPE_OPERATION_RESPONSE: u32 = 0x0000_0007;
+
+// Goodbye packet sentinel bytes — ptp-ptpip.md section 4.10.
+// length=8 (LE u32), packet_type=0xFFFFFFFF (LE u32).
+// The type 0xFFFFFFFF is not in the PtpIpPacketType enum, so decode_packet returns
+// UnknownPacketType before the dispatch match is reached.  read_packet checks this
+// sentinel BEFORE calling decode_packet to give a clean session-close path. [H]
+const GOODBYE_LEN: usize = 8;
 
 // response_code::OK = 0x2001 — used in the raw OperationResponse frame after streaming.
 // fuji_ptp::constants::response_code::OK
@@ -223,6 +230,11 @@ async fn server_loop(
 // InitEventRequest → InitEventAck, and then exits.  It simply pends forever if
 // no event client connects; it is dropped when the session ends.
 //
+// M-7 fix: the JoinHandle returned by tokio::spawn is stored and .abort()ed
+// at the end of handle_session.  Previously the handle was dropped (detached),
+// leaving the task alive past session end if no event client ever connected —
+// leaking an active Accept future on the shared event_listener.
+//
 // Never driven via tokio::select! — always run to completion.
 // NOT cancel-safe: owns TcpStreams and holds accumulated read state.
 async fn handle_session(
@@ -235,9 +247,9 @@ async fn handle_session(
     // ── Command channel handshake (section 5.1 steps 2-4) ────────────────────
 
     // Step 1: Init Command Request.
-    let pkt = read_packet(&mut cmd_stream).await?;
-    match pkt {
-        PtpIpPacket::InitCommandRequest { version, .. } => {
+    let result = read_packet(&mut cmd_stream).await?;
+    match result {
+        ReadPacketResult::Packet(PtpIpPacket::InitCommandRequest { version, .. }) => {
             if version != FUJI_PTPIP_VERSION {
                 return Err(SimError::ProtocolViolation(format!(
                     "InitCommandRequest: expected version=0x{FUJI_PTPIP_VERSION:08X}, got 0x{version:08X}"
@@ -251,7 +263,12 @@ async fn handle_session(
             };
             write_packet(&mut cmd_stream, &ack).await?;
         }
-        other => {
+        ReadPacketResult::Goodbye => {
+            return Err(SimError::ProtocolViolation(
+                "goodbye received before InitCommandRequest".into(),
+            ));
+        }
+        ReadPacketResult::Packet(other) => {
             return Err(SimError::ProtocolViolation(format!(
                 "expected InitCommandRequest, got {other:?}"
             )));
@@ -262,15 +279,17 @@ async fn handle_session(
     // After sending InitCommandAck the client MAY connect the event channel.
     // We accept it opportunistically in a background task so the dispatch loop
     // below is NEVER blocked waiting for it.  If no client connects the task
-    // simply pends until it is dropped at the end of this session.
+    // simply pends until it is aborted at the end of this session (M-7).
     //
     // cancel-safe annotation for the spawned task: the task owns its own
     // TcpStream and drives it to completion; it is never cancelled mid-frame.
-    tokio::spawn(async move {
+    // M-7: store the handle so we can abort() the task when the session ends,
+    // preventing the task from outliving the session on the shared event_listener.
+    let event_task = tokio::spawn(async move {
         if let Ok((mut event_stream, _)) = event_listener.accept().await {
             // Read InitEventRequest and reply InitEventAck.
             // Ignore errors — the background task is best-effort.
-            if let Ok(pkt) = read_packet(&mut event_stream).await
+            if let Ok(ReadPacketResult::Packet(pkt)) = read_packet(&mut event_stream).await
                 && matches!(pkt, PtpIpPacket::InitEventRequest { .. })
             {
                 let _ = write_packet(&mut event_stream, &PtpIpPacket::InitEventAck).await;
@@ -280,22 +299,52 @@ async fn handle_session(
     });
 
     // ── Operation dispatch loop (section 5.1 steps 8-13) ─────────────────────
-    loop {
-        let pkt = read_packet(&mut cmd_stream).await?;
+    let session_result = run_dispatch_loop(&mut cmd_stream, &mut dispatch_state, config).await;
 
-        match pkt {
-            PtpIpPacket::OperationRequest {
+    // M-7: abort the event background task before returning, whether the session
+    // ended cleanly (CloseSession / Goodbye) or with an error.  Without abort()
+    // the task would linger waiting on event_listener.accept() indefinitely.
+    event_task.abort();
+
+    session_result
+}
+
+// Drives the command-channel dispatch loop until the session ends cleanly or
+// returns an error.  Extracted so handle_session can unconditionally abort the
+// event task after this returns.
+//
+// NOT cancel-safe: owns partial TcpStream read state across .await points.
+async fn run_dispatch_loop(
+    cmd_stream: &mut TcpStream,
+    dispatch_state: &mut DispatchState,
+    config: &ServerConfig,
+) -> Result<(), SimError> {
+    loop {
+        let result = read_packet(cmd_stream).await?;
+
+        match result {
+            // M-6: Goodbye sentinel is now returned by read_packet before decode_packet
+            // is called, so this arm replaces the old Ping-based heuristic and avoids
+            // the spurious ProtocolViolation log that occurred when type=0xFFFFFFFF
+            // was passed to decode_packet.
+            ReadPacketResult::Goodbye => {
+                // Peer closed the session cleanly via the goodbye sentinel.
+                // ptp-ptpip.md section 4.10. [H]
+                return Ok(());
+            }
+
+            ReadPacketResult::Packet(PtpIpPacket::OperationRequest {
                 opcode: op,
                 transaction_id,
                 params,
                 data_phase,
                 ..
-            } => {
+            }) => {
                 // For write operations (data_phase == 2), consume the data packets
                 // before dispatching — the server does not use the data for any
                 // operation currently, but must drain them to keep the framing aligned.
                 let data_payload: Option<Vec<u8>> = if data_phase == 2 {
-                    let payload = read_data_phase(&mut cmd_stream).await?;
+                    let payload = read_data_phase(cmd_stream).await?;
                     Some(payload)
                 } else {
                     None
@@ -306,7 +355,7 @@ async fn handle_session(
                     transaction_id,
                     &params,
                     data_payload.as_deref(),
-                    &mut dispatch_state,
+                    dispatch_state,
                     config,
                 )?;
 
@@ -315,7 +364,7 @@ async fn handle_session(
                 match dispatch_result {
                     DispatchResult::Packets(pkts) => {
                         for pkt in &pkts {
-                            write_packet(&mut cmd_stream, pkt).await?;
+                            write_packet(cmd_stream, pkt).await?;
                         }
                     }
                     DispatchResult::StreamObject {
@@ -414,21 +463,12 @@ async fn handle_session(
                 }
 
                 if is_close {
-                    // Session ended cleanly.
+                    // Session ended cleanly via CloseSession.
                     return Ok(());
                 }
             }
 
-            // Goodbye packet (section 4.10): length=8, type=0xFFFFFFFF.
-            // fuji_ptp decodes it as an unknown packet type; the raw bytes match
-            // GOODBYE_PACKET. We handle the framing-level goodbye here:
-            // a 4-byte or 8-byte marker with 0xFF bytes signals graceful disconnect.
-            PtpIpPacket::Ping { raw_payload } if raw_payload.iter().all(|b| *b == 0xFF) => {
-                // Treat as goodbye — close cleanly.
-                return Ok(());
-            }
-
-            other => {
+            ReadPacketResult::Packet(other) => {
                 return Err(SimError::ProtocolViolation(format!(
                     "unexpected packet in operation loop: {other:?}"
                 )));
@@ -446,19 +486,24 @@ async fn read_data_phase(stream: &mut TcpStream) -> Result<Vec<u8>, SimError> {
     let mut accumulated: Vec<u8> = Vec::new();
 
     loop {
-        let pkt = read_packet(stream).await?;
-        match pkt {
-            PtpIpPacket::StartData { .. } => {
+        let result = read_packet(stream).await?;
+        match result {
+            ReadPacketResult::Goodbye => {
+                return Err(SimError::ProtocolViolation(
+                    "goodbye received during data phase".into(),
+                ));
+            }
+            ReadPacketResult::Packet(PtpIpPacket::StartData { .. }) => {
                 // Noted; nothing to extract.
             }
-            PtpIpPacket::DataPacket { payload, .. } => {
+            ReadPacketResult::Packet(PtpIpPacket::DataPacket { payload, .. }) => {
                 accumulated.extend_from_slice(&payload);
             }
-            PtpIpPacket::EndData { payload, .. } => {
+            ReadPacketResult::Packet(PtpIpPacket::EndData { payload, .. }) => {
                 accumulated.extend_from_slice(&payload);
                 return Ok(accumulated);
             }
-            other => {
+            ReadPacketResult::Packet(other) => {
                 return Err(SimError::ProtocolViolation(format!(
                     "expected data-phase packet, got {other:?}"
                 )));
@@ -469,6 +514,18 @@ async fn read_data_phase(stream: &mut TcpStream) -> Result<Vec<u8>, SimError> {
 
 // ── Framing I/O ───────────────────────────────────────────────────────────────
 
+/// Result of [`read_packet`]: either a decoded packet or the goodbye sentinel.
+///
+/// The goodbye packet (length=8, type=0xFFFFFFFF) is not a valid `PtpIpPacketType`,
+/// so `decode_packet` would return `UnknownPacketType`.  We intercept it before
+/// decoding and return `Goodbye` so callers get a clean session-close signal.
+enum ReadPacketResult {
+    Packet(PtpIpPacket),
+    /// Goodbye sentinel received — the peer is closing the connection cleanly.
+    /// ptp-ptpip.md section 4.10. [H]
+    Goodbye,
+}
+
 /// Reads one length-prefixed PTP-IP packet from `stream`.
 ///
 /// Wire framing (section 2 / section 4.1):
@@ -478,9 +535,15 @@ async fn read_data_phase(stream: &mut TcpStream) -> Result<Vec<u8>, SimError> {
 /// Validates the declared length before reading to prevent allocation exhaustion
 /// on malformed or adversarial inputs.
 ///
+/// M-6 fix: checks the full 8-byte buffer against [`GOODBYE_PACKET`] BEFORE
+/// calling `decode_packet`.  The goodbye packet's type (0xFFFFFFFF) is absent from
+/// the `PtpIpPacketType` enum, so without this check `decode_packet` returns
+/// `UnknownPacketType`, the dispatch loop logs a spurious protocol error, and the
+/// session ends uncleanly.
+///
 // NOT cancel-safe: partial reads leave the stream in an unrecoverable state.
 // Never used under tokio::select! — always driven to completion.
-async fn read_packet(stream: &mut TcpStream) -> Result<PtpIpPacket, SimError> {
+async fn read_packet(stream: &mut TcpStream) -> Result<ReadPacketResult, SimError> {
     // Read the 4-byte length prefix.
     let mut len_buf = [0u8; 4];
     stream
@@ -517,7 +580,16 @@ async fn read_packet(stream: &mut TcpStream) -> Result<PtpIpPacket, SimError> {
         .await
         .map_err(|_| SimError::UnexpectedDisconnect)?;
 
+    // M-6: check for the goodbye sentinel BEFORE decode_packet.
+    // GOODBYE_PACKET = [0x08, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]
+    // type=0xFFFFFFFF is not in PtpIpPacketType so decode_packet would return
+    // UnknownPacketType, causing a spurious protocol-error log at session end.
+    if buf.len() == GOODBYE_LEN && buf[..GOODBYE_LEN] == GOODBYE_PACKET {
+        return Ok(ReadPacketResult::Goodbye);
+    }
+
     decode_packet(&buf)
+        .map(ReadPacketResult::Packet)
         .map_err(|e| SimError::ProtocolViolation(format!("PTP-IP decode error: {e}")))
 }
 
