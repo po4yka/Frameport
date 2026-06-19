@@ -3,8 +3,8 @@ package dev.po4yka.frameport.camera.domain
 import dev.po4yka.frameport.camera.api.BleConnectionState
 import dev.po4yka.frameport.camera.api.CharacteristicId
 import dev.po4yka.frameport.camera.api.FujiBleClient
-import dev.po4yka.frameport.camera.api.FujiNativeSdk
 import dev.po4yka.frameport.camera.api.RemoteCaptureError
+import dev.po4yka.frameport.camera.api.RemoteCaptureRepository
 import dev.po4yka.frameport.camera.api.RemoteCaptureRequest
 import dev.po4yka.frameport.camera.api.RemoteCaptureState
 import dev.po4yka.frameport.camera.api.SessionId
@@ -22,7 +22,7 @@ import javax.inject.Inject
  * Boundary contract:
  * - This use case NEVER accesses BluetoothGatt, JNI, or any Android platform I/O type directly.
  * - BLE I/O is delegated entirely to [FujiBleClient].
- * - PTP-IP I/O is delegated entirely to [FujiNativeSdk.remoteShutter].
+ * - PTP-IP I/O is delegated entirely to [RemoteCaptureRepository.remoteShutter].
  * - The compatibility gate fires FIRST; [RemoteCaptureError.IncompatibleCamera] terminates the
  *   flow immediately without attempting any camera I/O.
  *
@@ -47,7 +47,7 @@ class RemoteCaptureUseCase
     @Inject
     constructor(
         private val fujiBleClient: FujiBleClient,
-        private val fujiNativeSdk: FujiNativeSdk,
+        private val remoteCaptureRepository: RemoteCaptureRepository,
         private val capabilityChecker: RemoteCapabilityChecker,
         @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
     ) {
@@ -137,7 +137,7 @@ class RemoteCaptureUseCase
             }
         }
 
-        // cancel-safe: FujiNativeSdk.remoteShutter is a single withContext call; cancel-safe per its contract.
+        // cancel-safe: RemoteCaptureRepository.remoteShutter is a single withContext call; cancel-safe per its contract.
         private suspend fun kotlinx.coroutines.flow.FlowCollector<RemoteCaptureState>.executePtpIpShutter(
             action: ShutterAction,
             sessionId: SessionId,
@@ -158,7 +158,7 @@ class RemoteCaptureUseCase
                 }
             }
 
-            val result = fujiNativeSdk.remoteShutter(sessionId = sessionId, action = action)
+            val result = remoteCaptureRepository.remoteShutter(sessionId = sessionId, action = action)
 
             if (result.isFailure) {
                 val detail = result.exceptionOrNull()?.javaClass?.simpleName ?: "sdk-failed"

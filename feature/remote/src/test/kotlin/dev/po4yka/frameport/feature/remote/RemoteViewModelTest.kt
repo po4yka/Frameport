@@ -7,8 +7,10 @@ import dev.po4yka.frameport.camera.api.BleConnectionState
 import dev.po4yka.frameport.camera.api.CameraProfile
 import dev.po4yka.frameport.camera.api.CameraProfileRepository
 import dev.po4yka.frameport.camera.api.RemoteCaptureError
+import dev.po4yka.frameport.camera.api.RemoteCaptureRepository
 import dev.po4yka.frameport.camera.api.RemoteCaptureRequest
 import dev.po4yka.frameport.camera.api.RemoteCaptureState
+import dev.po4yka.frameport.camera.api.SessionId
 import dev.po4yka.frameport.camera.api.ShutterAction
 import dev.po4yka.frameport.camera.domain.AllowlistRemoteCapabilityChecker
 import dev.po4yka.frameport.camera.domain.RemoteCaptureUseCase
@@ -17,10 +19,10 @@ import dev.po4yka.frameport.core.testing.FakeFujiNativeSdk
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -36,8 +38,9 @@ import org.junit.Test
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Builds a [RemoteCaptureUseCase] backed by [FakeFujiBleClient] and
- * [FakeFujiNativeSdk] using [AllowlistRemoteCapabilityChecker] (X-T5 passes).
+ * Builds a [RemoteCaptureUseCase] backed by [FakeFujiBleClient] and a
+ * [RemoteCaptureRepository] adapter over [FakeFujiNativeSdk], using
+ * [AllowlistRemoteCapabilityChecker] (X-T5 passes).
  *
  * [testDispatcher] is injected as the IO dispatcher so flowOn executes on the
  * controlled test dispatcher rather than a real IO thread.
@@ -49,7 +52,7 @@ private fun buildUseCase(
 ): RemoteCaptureUseCase =
     RemoteCaptureUseCase(
         fujiBleClient = fakeBle,
-        fujiNativeSdk = fakeSdk,
+        remoteCaptureRepository = FakeSdkRemoteCaptureRepository(fakeSdk),
         capabilityChecker = AllowlistRemoteCapabilityChecker,
         ioDispatcher = testDispatcher,
     )
@@ -566,6 +569,25 @@ class RemoteViewModelTest {
             )
             assertTrue(fakeBle.writeCalls.isEmpty())
         }
+}
+
+// ─── FakeSdkRemoteCaptureRepository ──────────────────────────────────────────
+
+/**
+ * Adapts [FakeFujiNativeSdk] to [RemoteCaptureRepository] so [buildUseCase] can pass
+ * a [RemoteCaptureRepository] to [RemoteCaptureUseCase] without touching production data code.
+ *
+ * Delegates directly to [FakeFujiNativeSdk.remoteShutter] which always returns success
+ * unless overridden by a future control API.
+ */
+private class FakeSdkRemoteCaptureRepository(
+    private val sdk: FakeFujiNativeSdk,
+) : RemoteCaptureRepository {
+    // cancel-safe: delegates to FakeFujiNativeSdk.remoteShutter which returns immediately.
+    override suspend fun remoteShutter(
+        sessionId: SessionId,
+        action: ShutterAction,
+    ): Result<Unit> = sdk.remoteShutter(sessionId, action)
 }
 
 private class FakeCameraProfileRepository : CameraProfileRepository {

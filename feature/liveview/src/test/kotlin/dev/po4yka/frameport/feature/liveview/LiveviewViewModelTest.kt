@@ -2,14 +2,9 @@ package dev.po4yka.frameport.feature.liveview
 
 import android.graphics.Bitmap
 import app.cash.turbine.test
-import dev.po4yka.frameport.camera.api.CameraObjectHandle
-import dev.po4yka.frameport.camera.api.EndpointMetadata
-import dev.po4yka.frameport.camera.api.FujiNativeSdk
+import dev.po4yka.frameport.camera.api.LiveViewRepository
 import dev.po4yka.frameport.camera.api.LiveViewUiState
 import dev.po4yka.frameport.camera.api.SessionId
-import dev.po4yka.frameport.camera.api.ShutterAction
-import dev.po4yka.frameport.camera.api.TransferId
-import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.camera.domain.LiveViewUseCase
 import dev.po4yka.frameport.core.testing.FakeDiagnosticsRepository
 import dev.po4yka.frameport.core.testing.FakeFujiNativeSdk
@@ -18,7 +13,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -92,7 +86,7 @@ class LiveviewViewModelTest {
         decoderCallCount.set(0)
         fakeSdk = FakeFujiNativeSdk()
         fakeDiagnostics = FakeDiagnosticsRepository()
-        useCase = LiveViewUseCase(fakeSdk)
+        useCase = LiveViewUseCase(FakeSdkLiveViewRepository(fakeSdk))
         viewModel = buildViewModel()
     }
 
@@ -411,47 +405,11 @@ private class FakeLiveViewSource {
         channelClose?.invoke()
     }
 
-    fun asUseCase(): LiveViewUseCase = LiveViewUseCase(StubSdk())
+    fun asUseCase(): LiveViewUseCase = LiveViewUseCase(StubRepository())
 
-    private inner class StubSdk : FujiNativeSdk {
-        override suspend fun openWifiSession(
-            socketFd: Int,
-            endpointMetadata: EndpointMetadata,
-        ): Result<SessionId> = Result.success(SessionId(0L))
-
-        override suspend fun closeSession(sessionId: SessionId) = Unit
-
-        override suspend fun listMedia(
-            sessionId: SessionId,
-        ): Result<List<dev.po4yka.frameport.camera.api.CameraMediaObject>> = Result.success(emptyList())
-
-        override suspend fun getThumbnail(
-            sessionId: SessionId,
-            objectHandle: CameraObjectHandle,
-        ): Result<ByteArray> = Result.success(byteArrayOf())
-
-        override fun downloadObjectToFd(
-            sessionId: SessionId,
-            objectHandle: CameraObjectHandle,
-            outputFd: Int,
-        ): Flow<TransferProgress> = emptyFlow()
-
-        override suspend fun cancelTransfer(transferId: TransferId) = Unit
-
-        override suspend fun openUsbSession(
-            usbFd: Int,
-            descriptors: ByteArray,
-        ): Result<SessionId> = Result.success(SessionId(0L))
-
-        override suspend fun closeUsbSession(sessionId: SessionId) = Unit
-
-        override suspend fun remoteShutter(
-            sessionId: SessionId,
-            action: ShutterAction,
-        ): Result<Unit> = Result.success(Unit)
-
-        // cancel-safe: callbackFlow with awaitClose; cancellation of the downstream
-        // collector triggers awaitClose which sets isClosed = true.
+    // cancel-safe: callbackFlow with awaitClose; cancellation of the downstream
+    // collector triggers awaitClose which sets isClosed = true.
+    private inner class StubRepository : LiveViewRepository {
         override fun liveViewFrames(
             sessionId: SessionId,
             liveViewFd: Int,
@@ -468,6 +426,21 @@ private class FakeLiveViewSource {
     }
 }
 
+// ─── FakeSdkLiveViewRepository ───────────────────────────────────────────────
+
+/**
+ * Adapts [FakeFujiNativeSdk] to [LiveViewRepository] so tests that drive frames via
+ * [FakeFujiNativeSdk.emitLiveViewFrame] (tests 7 and 8) can construct [LiveViewUseCase].
+ */
+private class FakeSdkLiveViewRepository(
+    private val sdk: FakeFujiNativeSdk,
+) : LiveViewRepository {
+    override fun liveViewFrames(
+        sessionId: SessionId,
+        liveViewFd: Int,
+    ): Flow<ByteArray> = sdk.liveViewFrames(sessionId, liveViewFd)
+}
+
 // ─── ThrowingLiveViewSource ───────────────────────────────────────────────────
 
 /**
@@ -478,46 +451,10 @@ private class ThrowingLiveViewSource(
     private val goodFrames: Int,
     private val frameBytes: ByteArray,
 ) {
-    fun asUseCase(): LiveViewUseCase = LiveViewUseCase(StubSdk())
+    fun asUseCase(): LiveViewUseCase = LiveViewUseCase(StubRepository())
 
-    private inner class StubSdk : FujiNativeSdk {
-        override suspend fun openWifiSession(
-            socketFd: Int,
-            endpointMetadata: EndpointMetadata,
-        ): Result<SessionId> = Result.success(SessionId(0L))
-
-        override suspend fun closeSession(sessionId: SessionId) = Unit
-
-        override suspend fun listMedia(
-            sessionId: SessionId,
-        ): Result<List<dev.po4yka.frameport.camera.api.CameraMediaObject>> = Result.success(emptyList())
-
-        override suspend fun getThumbnail(
-            sessionId: SessionId,
-            objectHandle: CameraObjectHandle,
-        ): Result<ByteArray> = Result.success(byteArrayOf())
-
-        override fun downloadObjectToFd(
-            sessionId: SessionId,
-            objectHandle: CameraObjectHandle,
-            outputFd: Int,
-        ): Flow<TransferProgress> = emptyFlow()
-
-        override suspend fun cancelTransfer(transferId: TransferId) = Unit
-
-        override suspend fun openUsbSession(
-            usbFd: Int,
-            descriptors: ByteArray,
-        ): Result<SessionId> = Result.success(SessionId(0L))
-
-        override suspend fun closeUsbSession(sessionId: SessionId) = Unit
-
-        override suspend fun remoteShutter(
-            sessionId: SessionId,
-            action: ShutterAction,
-        ): Result<Unit> = Result.success(Unit)
-
-        // NOT cancel-safe: emits N frames then throws; partial delivery on cancellation.
+    // NOT cancel-safe: emits N frames then throws; partial delivery on cancellation.
+    private inner class StubRepository : LiveViewRepository {
         override fun liveViewFrames(
             sessionId: SessionId,
             liveViewFd: Int,

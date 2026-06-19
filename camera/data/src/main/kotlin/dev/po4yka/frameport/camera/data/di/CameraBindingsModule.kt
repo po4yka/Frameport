@@ -7,13 +7,17 @@ import dagger.hilt.components.SingletonComponent
 import dev.po4yka.frameport.camera.api.CameraProfileRepository
 import dev.po4yka.frameport.camera.api.CameraRepository
 import dev.po4yka.frameport.camera.api.FujiNativeSdk
+import dev.po4yka.frameport.camera.api.LiveViewRepository
 import dev.po4yka.frameport.camera.api.MediaRepository
+import dev.po4yka.frameport.camera.api.RemoteCaptureRepository
 import dev.po4yka.frameport.camera.api.TransferRepository
 import dev.po4yka.frameport.camera.data.CameraProfileRepositoryImpl
 import dev.po4yka.frameport.camera.data.CameraRepositoryImpl
 import dev.po4yka.frameport.camera.data.FujiNativeSdkAdapter
+import dev.po4yka.frameport.camera.data.LiveViewRepositoryImpl
 import dev.po4yka.frameport.camera.data.MediaRepositoryImpl
 import dev.po4yka.frameport.camera.data.RemoteCapabilityCheckerBinding
+import dev.po4yka.frameport.camera.data.RemoteCaptureRepositoryImpl
 import dev.po4yka.frameport.camera.data.TransferRepositoryImpl
 import dev.po4yka.frameport.camera.domain.RemoteCapabilityChecker
 import javax.inject.Singleton
@@ -53,4 +57,12 @@ interface CameraBindingsModule {
     @Binds
     @Singleton
     fun bindCameraProfileRepository(impl: CameraProfileRepositoryImpl): CameraProfileRepository
+
+    @Binds
+    @Singleton
+    fun bindLiveViewRepository(impl: LiveViewRepositoryImpl): LiveViewRepository
+
+    @Binds
+    @Singleton
+    fun bindRemoteCaptureRepository(impl: RemoteCaptureRepositoryImpl): RemoteCaptureRepository
 }

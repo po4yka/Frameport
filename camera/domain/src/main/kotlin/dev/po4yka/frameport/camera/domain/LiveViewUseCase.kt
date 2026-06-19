@@ -1,27 +1,27 @@
 package dev.po4yka.frameport.camera.domain
 
-import dev.po4yka.frameport.camera.api.FujiNativeSdk
+import dev.po4yka.frameport.camera.api.LiveViewRepository
 import dev.po4yka.frameport.camera.api.SessionId
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 
 /**
- * Domain use case that wraps [FujiNativeSdk.liveViewFrames] into a [Flow<ByteArray>]
+ * Domain use case that wraps [LiveViewRepository.liveViewFrames] into a [Flow<ByteArray>]
  * the ViewModel collects.
  *
  * Boundary contract:
  * - This use case NEVER accesses BluetoothGatt, Wi-Fi APIs, JNI, or any Android
  *   platform I/O type directly.
- * - All camera I/O is delegated to [FujiNativeSdk.liveViewFrames].
+ * - All camera I/O is delegated to [LiveViewRepository.liveViewFrames].
  * - The caller (ViewModel) is responsible for obtaining [liveViewFd] from
  *   [dev.po4yka.frameport.camera.api.CameraWifiConnector.openLiveViewSocket] before
  *   invoking this use case.
  *
  * Backpressure / latest-frame-wins contract:
- * The underlying [kotlinx.coroutines.channels.callbackFlow] inside [FujiNativeSdk]
- * uses [kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST] so the Rust read
- * loop is never blocked on a slow Compose consumer. Callers MUST NOT assume every
- * frame is delivered.
+ * The underlying [kotlinx.coroutines.channels.callbackFlow] inside the repository
+ * implementation uses [kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST] so the
+ * Rust read loop is never blocked on a slow Compose consumer. Callers MUST NOT assume
+ * every frame is delivered.
  *
  * fd ownership contract for [liveViewFd]:
  * The caller must pass an Android-owned, detached raw socket fd already bound to the
@@ -39,7 +39,7 @@ import javax.inject.Inject
 class LiveViewUseCase
     @Inject
     constructor(
-        private val fujiNativeSdk: FujiNativeSdk,
+        private val liveViewRepository: LiveViewRepository,
     ) {
         /**
          * Returns a cold [Flow<ByteArray>] of JPEG frames from the live-view channel.
@@ -48,15 +48,15 @@ class LiveViewUseCase
          * Rust zero-alloc live-view parser. Collecting the flow starts the Rust read loop;
          * cancelling the collector stops it.
          *
-         * @param sessionId Active PTP-IP session returned by [FujiNativeSdk.openWifiSession].
+         * @param sessionId Active PTP-IP session.
          * @param liveViewFd Detached fd for the live-view socket (port 55742).
-         *   Rust borrows and dups it on collection. MUST NOT be used after this call.
+         *   The repository borrows and dups it on collection. MUST NOT be used after this call.
          * @return Cold [Flow<ByteArray>] of JPEG frames. Latest-frame-wins; frames may be dropped.
          */
-        // cancel-safe: delegates to FujiNativeSdk.liveViewFrames which is a callbackFlow with
-        // awaitClose. Cancellation triggers awaitClose which stops the Rust read loop cleanly.
+        // cancel-safe: delegates to LiveViewRepository.liveViewFrames which is a callbackFlow
+        // with awaitClose. Cancellation triggers awaitClose which stops the Rust read loop cleanly.
         operator fun invoke(
             sessionId: SessionId,
             liveViewFd: Int,
-        ): Flow<ByteArray> = fujiNativeSdk.liveViewFrames(sessionId = sessionId, liveViewFd = liveViewFd)
+        ): Flow<ByteArray> = liveViewRepository.liveViewFrames(sessionId = sessionId, liveViewFd = liveViewFd)
     }
