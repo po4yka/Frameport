@@ -8,6 +8,7 @@ import dev.po4yka.frameport.camera.api.ErrorLayer
 import dev.po4yka.frameport.camera.api.diagnosticEvent
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -51,7 +52,9 @@ class DiagnosticBundleExporterTest {
         every { context.packageManager } returns packageManager
 
         timeline = DiagnosticTimeline()
-        exporter = DiagnosticBundleExporter(context)
+        // H-4: pass UnconfinedTestDispatcher so withContext(ioDispatcher) in export()
+        // executes immediately on the test thread without suspending.
+        exporter = DiagnosticBundleExporter(context, UnconfinedTestDispatcher())
     }
 
     // ── zip location ─────────────────────────────────────────────────────────────
