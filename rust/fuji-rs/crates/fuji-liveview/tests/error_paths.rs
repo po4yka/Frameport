@@ -381,19 +381,24 @@ async fn given_stream_truncated_mid_header__when_run_liveview_loop__then_unexpec
 }
 
 /// GIVEN a stream with a valid 4-byte prefix declaring length > RING_BUFFER_SIZE
+///       (within the drainable cap) but a truncated body
 /// WHEN run_liveview_loop reads it
-/// THEN it returns Err(FrameTooLarge) and increments drop_count.
+/// THEN it counts the oversized frame as a drop and drains the body to stay
+///      frame-aligned, then hits EOF on the truncated body → UnexpectedEof.
 ///
-/// The loop validates declared_len before attempting to read the body, so
-/// it does NOT try to allocate an oversized buffer.
+/// An oversized-but-modest frame is a recoverable per-frame condition: the loop
+/// drains it and continues rather than tearing down the session (the previous
+/// behaviour returned FrameTooLarge and killed the stream). Here the body is
+/// truncated, so the drain reaches EOF.
 #[tokio::test]
-async fn given_stream_with_oversized_declared_len__when_loop__then_frame_too_large() {
+async fn given_stream_with_oversized_declared_len__when_loop__then_drains_then_eof() {
     let mut parser = LiveViewParser::new(session_id());
 
-    // Write a 4-byte prefix claiming a length of RING_BUFFER_SIZE + 1.
+    // Write a 4-byte prefix claiming a length of RING_BUFFER_SIZE + 1
+    // (oversized but within the drainable cap of RING_BUFFER_SIZE * 4).
     let declared: u32 = (RING_BUFFER_SIZE + 1) as u32;
     let mut buf = declared.to_le_bytes().to_vec();
-    // Pad with some extra bytes (the loop won't read them — it returns early).
+    // Only 32 body bytes follow, far fewer than declared → the drain hits EOF.
     buf.extend_from_slice(&[0u8; 32]);
     let mut stream = std::io::Cursor::new(buf);
     let stop = AtomicBool::new(false);
@@ -403,14 +408,14 @@ async fn given_stream_with_oversized_declared_len__when_loop__then_frame_too_lar
 
     assert_eq!(
         result,
-        Err(LiveViewError::FrameTooLarge),
-        "declared_len > RING_BUFFER_SIZE must return FrameTooLarge from the loop"
+        Err(LiveViewError::UnexpectedEof),
+        "an oversized frame is drained, not fatal; a truncated body then hits EOF"
     );
     assert_eq!(frame_count, 0);
     assert_eq!(
         parser.stats().drop_count,
         1,
-        "drop_count must be incremented to 1 by the loop's FrameTooLarge path"
+        "the oversized frame must still be counted as a drop"
     );
 }
 

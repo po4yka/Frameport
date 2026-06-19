@@ -188,6 +188,12 @@ pub struct LiveViewParser {
     /// Fixed ring buffer -- heap-allocated once at construction, reused every frame.
     buffer: Box<[u8; RING_BUFFER_SIZE]>,
     /// Running statistics updated in place by `parse_frame`.
+    ///
+    /// NOTE: this field is intentionally `pub` because `tests/alloc_shim.rs` resets
+    /// individual sub-fields directly (`parser.stats.sequence = 0`) to avoid a heap
+    /// allocation inside the zero-alloc measurement window.  Making it private would
+    /// require edits to files outside this crate's `src/` tree.  The accessor method
+    /// `stats()` is the preferred read path for all other callers.
     pub stats: FrameStats,
 }
 
@@ -351,6 +357,13 @@ impl LiveViewParser {
 
 // Async read-loop helper
 
+/// Discard buffer size used when draining an oversized frame body.
+///
+/// Must be small enough to avoid a large stack frame but large enough to make
+/// drain loops efficient for the common case. 4 KiB is consistent with typical
+/// kernel socket buffer granularity and keeps the stack overhead trivial.
+const DRAIN_BUF_SIZE: usize = 4096;
+
 /// Drive the live-view parser over an `AsyncRead` source.
 ///
 /// Reads length-prefixed TCP packets from `reader` in a loop per
@@ -363,21 +376,32 @@ impl LiveViewParser {
 /// `on_frame` receives `&[u8]` pointing into the parser's ring buffer.
 /// It MUST NOT retain this reference across the call boundary.
 ///
+/// # Oversized frames
+///
+/// When `frame_buffer_mut` rejects a frame as `FrameTooLarge`, the body bytes
+/// (`declared_len - TRANSPORT_PREFIX_LEN`) are still sitting in the TCP stream.
+/// This function drains them through a fixed 4 KiB stack buffer (`DRAIN_BUF_SIZE`)
+/// in a bounded loop so that the stream stays frame-aligned, then `continue`s to
+/// the next frame. The session is NOT torn down. `parser.stats.drop_count` is
+/// incremented once by `frame_buffer_mut` before control returns here.
+///
 /// # Cancel-safety
 ///
-/// cancel-safe: the two `read_exact` calls per frame are individually
-/// cancel-safe (tokio re-tries partial reads when re-polled). On cancellation
-/// between the two reads, at most one partially-read packet is discarded.
-/// The parser's ring buffer and stats remain consistent because `parse_frame`
-/// is only called after both reads complete successfully.
+/// cancel-safe: the `read_exact` calls per frame (including the drain loop) are
+/// individually cancel-safe (tokio re-tries partial reads when re-polled). On
+/// cancellation mid-drain, the stream position is advanced by an arbitrary
+/// partial amount; the next poll will resume draining. The parser's ring buffer
+/// and stats remain consistent because `finalize_frame` is only called after a
+/// complete, in-bounds frame has been read.
 ///
 /// # Allocation invariant
 ///
-/// ZERO heap allocation on the loop body. There is no scratch buffer: each frame is
-/// read directly into the parser's single ring buffer via [`LiveViewParser::frame_buffer_mut`]
-/// and validated in place by [`LiveViewParser::finalize_frame`] — no second buffer and
-/// no per-frame copy. `on_frame` is caller-controlled; any JVM byte[] allocation inside
-/// it is explicitly out of scope per the task spec.
+/// ZERO heap allocation on the happy-path loop body. There is no scratch buffer:
+/// each in-bounds frame is read directly into the parser's single ring buffer via
+/// [`LiveViewParser::frame_buffer_mut`] and validated in place by
+/// [`LiveViewParser::finalize_frame`] — no second buffer and no per-frame copy.
+/// The drain path uses a fixed 4 KiB stack array (zero heap alloc). `on_frame`
+/// is caller-controlled; any JVM byte[] allocation inside it is out of scope.
 pub async fn run_liveview_loop<R, F>(
     parser: &mut LiveViewParser,
     reader: &mut R,
@@ -408,10 +432,47 @@ where
 
         // Phase 2: borrow the ring buffer in place (bounds-checked), copy in the prefix,
         // and read the remaining body (FCW header + JPEG payload) directly into it.
+        //
+        // On FrameTooLarge: frame_buffer_mut already incremented drop_count. We must
+        // drain the unconsumed body bytes from the stream so the next frame starts at
+        // the correct TCP offset, then continue the loop. Returning Err here would
+        // permanently kill the session for a per-frame oversize condition.
         {
             let frame = match parser.frame_buffer_mut(declared_len) {
                 Ok(slice) => slice,
-                // frame_buffer_mut already bumped drop_count for an oversized frame.
+                Err(LiveViewError::FrameTooLarge) => {
+                    // A frame modestly larger than the ring buffer is a recoverable
+                    // per-frame oversize: drain and continue. But an absurd declared_len
+                    // (a corrupt or hostile stream sending e.g. 0xFFFFFFFF) would otherwise
+                    // stall the worker draining gigabytes 4 KiB at a time. Cap the
+                    // recoverable range; beyond it the stream is untrustworthy, so tear
+                    // down and let the caller reconnect.
+                    const MAX_DRAINABLE_LEN: usize = RING_BUFFER_SIZE * 4;
+                    if declared_len > MAX_DRAINABLE_LEN {
+                        return Err(LiveViewError::MalformedHeader);
+                    }
+                    // Drain the body (declared_len - TRANSPORT_PREFIX_LEN bytes) in 4 KiB
+                    // chunks so the stream stays frame-aligned. Do NOT allocate declared_len
+                    // bytes at once — the whole point is that the frame is too large to buffer.
+                    let mut to_drain = declared_len.saturating_sub(TRANSPORT_PREFIX_LEN);
+                    let mut discard = [0u8; DRAIN_BUF_SIZE];
+                    while to_drain > 0 {
+                        // Respect stop_signal during potentially long drains.
+                        if stop_signal.load(Ordering::Relaxed) {
+                            return Ok(());
+                        }
+                        let chunk = to_drain.min(DRAIN_BUF_SIZE);
+                        match reader.read_exact(&mut discard[..chunk]).await {
+                            Ok(_) => {}
+                            Err(_) => return Err(LiveViewError::UnexpectedEof),
+                        }
+                        to_drain -= chunk;
+                    }
+                    // Stream is now aligned to the start of the next frame.
+                    continue;
+                }
+                // MalformedHeader (declared_len < MIN_FRAME_SIZE): stream integrity is
+                // compromised; we cannot safely skip an unknown number of bytes.
                 Err(e) => return Err(e),
             };
             frame[..TRANSPORT_PREFIX_LEN].copy_from_slice(&prefix);
@@ -422,16 +483,24 @@ where
         } // the &mut ring-buffer borrow ends here, before finalize_frame re-borrows.
 
         // Phase 3: validate in place (no copy) and deliver the zero-copy JPEG slice.
+        //
+        // Note: finalize_frame never returns FrameTooLarge — it guards oversized values
+        // with MalformedHeader (the frame was already bounds-checked by frame_buffer_mut
+        // above and only reachable here when declared_len <= RING_BUFFER_SIZE).
         match parser.finalize_frame(declared_len) {
             Ok(jpeg_slice) => {
                 // Deliver JPEG payload; caller must not retain the reference.
                 on_frame(jpeg_slice);
             }
-            // Recoverable per-frame faults: skip and continue (do not tear down the stream).
-            Err(LiveViewError::FrameTooLarge) | Err(LiveViewError::InvalidJpegMarker) => {}
+            // Recoverable per-frame fault: bad JPEG marker — skip and continue.
+            Err(LiveViewError::InvalidJpegMarker) => {}
             // Stream-integrity faults: surface so the caller can reconnect.
             Err(LiveViewError::MalformedHeader) => return Err(LiveViewError::MalformedHeader),
             Err(LiveViewError::UnexpectedEof) => return Err(LiveViewError::UnexpectedEof),
+            // FrameTooLarge is unreachable here: frame_buffer_mut already handled it
+            // above (drain + continue). finalize_frame uses MalformedHeader for size
+            // violations. This arm is kept for exhaustiveness only.
+            Err(LiveViewError::FrameTooLarge) => return Err(LiveViewError::MalformedHeader),
         }
     }
 }
@@ -749,5 +818,78 @@ mod tests {
 
         let result = run_liveview_loop(&mut parser, &mut stream, |_| {}, &stop).await;
         assert_eq!(result, Err(LiveViewError::UnexpectedEof));
+    }
+
+    // H-1 regression: oversized frame followed by valid frame — stream must stay aligned.
+    //
+    // Constructs a stream where:
+    //   - Frame 1: 4-byte transport prefix declaring RING_BUFFER_SIZE + 1 bytes,
+    //     followed by the full body (RING_BUFFER_SIZE + 1 - 4 bytes of zeros).
+    //     This triggers the FrameTooLarge drain path.
+    //   - Frame 2: a well-formed JPEG frame.
+    //
+    // The loop must drain the oversized body, realign on Frame 2, deliver it, then
+    // return UnexpectedEof (stream exhausted). If the drain is missing the cursor
+    // position is wrong and Frame 2 is never parsed — delivered count stays 0.
+    #[tokio::test]
+    async fn loop_drains_oversized_frame_and_delivers_next_valid_frame() {
+        // Build the oversized "frame": a 4-byte prefix claiming RING_BUFFER_SIZE + 1
+        // bytes, followed by the matching body so the stream is well-formed at the TCP
+        // level. The parser must drain the body without allocating it all at once.
+        let oversized_declared: u32 = (RING_BUFFER_SIZE + 1) as u32;
+        let body_len = (RING_BUFFER_SIZE + 1).saturating_sub(TRANSPORT_PREFIX_LEN);
+        let mut buf = Vec::with_capacity(RING_BUFFER_SIZE + 1 + 64);
+        buf.extend_from_slice(&oversized_declared.to_le_bytes());
+        buf.extend(std::iter::repeat_n(0u8, body_len));
+
+        // Append a well-formed valid frame immediately after.
+        let valid_frame = make_frame(&minimal_jpeg(), 99);
+        buf.extend_from_slice(&valid_frame);
+
+        let mut stream = std::io::Cursor::new(buf);
+        let stop = AtomicBool::new(false);
+        let mut parser = LiveViewParser::new(session());
+        let mut delivered: Vec<Vec<u8>> = Vec::new();
+
+        let result = run_liveview_loop(
+            &mut parser,
+            &mut stream,
+            |s| delivered.push(s.to_vec()),
+            &stop,
+        )
+        .await;
+
+        // Stream ends after the valid frame → UnexpectedEof.
+        assert_eq!(
+            result,
+            Err(LiveViewError::UnexpectedEof),
+            "loop must exhaust the stream and return UnexpectedEof"
+        );
+        // The valid frame after the oversized one must have been delivered.
+        assert_eq!(
+            delivered.len(),
+            1,
+            "exactly one valid frame must be delivered after the oversized drain"
+        );
+        assert_eq!(
+            delivered[0][0], JPEG_SOI_BYTE_0,
+            "delivered frame must start with JPEG SOI byte 0"
+        );
+        assert_eq!(
+            delivered[0][1], JPEG_SOI_BYTE_1,
+            "delivered frame must start with JPEG SOI byte 1"
+        );
+        // drop_count was bumped once (by frame_buffer_mut for the oversized frame).
+        assert_eq!(
+            parser.stats().drop_count,
+            1,
+            "drop_count must be 1 after one oversized frame"
+        );
+        // sequence was bumped once (for the successfully delivered valid frame).
+        assert_eq!(
+            parser.stats().sequence,
+            1,
+            "sequence must be 1 after one successfully delivered frame"
+        );
     }
 }
