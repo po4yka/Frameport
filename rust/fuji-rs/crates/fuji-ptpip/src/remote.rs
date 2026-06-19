@@ -224,7 +224,25 @@ impl RemoteSession {
                         return Err(FujiError::Camera(CameraError::Busy { attempts }));
                     }
                     sleep(Duration::from_millis(self.config.retry_delay_ms)).await;
-                    // Continue loop — txn_id stays the same per the retry contract.
+                    // M-24: transaction_id is intentionally NOT incremented across
+                    // BUSY retries for SetDevicePropValue(ClientState).
+                    //
+                    // Standard PTP-IP requires a monotonically increasing transaction_id
+                    // per operation (ptp-ptpip.md §5.1). However, Fujifilm cameras that
+                    // respond BUSY to this specific operation expect the retry to re-send
+                    // the same transaction_id as the original attempt. This is confirmed
+                    // by the M03 session-init precedent: the retry loop re-uses the same
+                    // txn_id and the camera responds OK on a subsequent attempt.
+                    //
+                    // Reusing txn_id here is a Fujifilm-specific deviation from the
+                    // PTP-IP standard. If hardware testing shows the camera correctly
+                    // accepts an incremented txn_id on retry, this can be changed by
+                    // passing a `&mut TxnCounter` reference to this method and calling
+                    // `txn.next()` here.
+                    //
+                    // TODO(audit): M-24 — confirm or refute txn_id-reuse on BUSY via
+                    // hardware capture against a real Fujifilm X-T5 before the M16
+                    // JNI wiring milestone. If confirmed wrong, plumb TxnCounter here.
                 }
                 PtpIpPacket::OperationResponse { .. } => {
                     return Err(FujiError::Protocol(ProtocolError::OperationRejected));
