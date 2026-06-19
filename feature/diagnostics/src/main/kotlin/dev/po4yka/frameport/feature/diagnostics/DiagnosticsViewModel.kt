@@ -9,13 +9,11 @@ import dev.po4yka.frameport.camera.diagnostics.DiagnosticTimeline
 import dev.po4yka.frameport.core.common.di.IoDispatcher
 import dev.po4yka.frameport.core.model.FrameportError
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,21 +72,21 @@ class DiagnosticsViewModel
         /**
          * One-shot export result events. The UI collects this and shows a snackbar.
          * Replay is 0 — each event is consumed exactly once per active collector.
+         *
+         * extraBufferCapacity=64 ensures that rapid successive [exportBundle] calls
+         * (e.g. double-tap) are buffered without suspending the emitting coroutine,
+         * even if the collector is momentarily busy showing a previous snackbar.
+         *
+         * Note on event delivery: because replay=0 and there is no bridge coroutine,
+         * events emitted before a collector subscribes are NOT replayed. The UI layer
+         * uses repeatOnLifecycle(STARTED) which subscribes while the screen is visible;
+         * events emitted while the screen is off (STOPPED) are intentionally dropped —
+         * a stale "Export succeeded" snackbar on re-entry would be confusing.
          */
-        // cancel-safe: Channel(Channel.BUFFERED) with receiveAsFlow; cancellation drains cleanly.
-        private val _exportResult = Channel<ExportResult>(Channel.BUFFERED)
-        val exportResult: SharedFlow<ExportResult> =
-            _exportResult
-                .receiveAsFlow()
-                .let {
-                    // Expose as SharedFlow so multiple collectors (e.g. preview) can observe.
-                    // In practice only one snackbar host collects.
-                    val backing = MutableSharedFlow<ExportResult>(replay = 0, extraBufferCapacity = 4)
-                    viewModelScope.launch {
-                        it.collect { result -> backing.emit(result) }
-                    }
-                    backing.asSharedFlow()
-                }
+        // cancel-safe: MutableSharedFlow with no persistent coroutines; emit is fast-path
+        // (buffer has capacity) and does not suspend in normal operation.
+        private val _exportResult = MutableSharedFlow<ExportResult>(replay = 0, extraBufferCapacity = 64)
+        val exportResult: SharedFlow<ExportResult> = _exportResult.asSharedFlow()
 
         /**
          * Triggers a diagnostic bundle export on [IoDispatcher].
@@ -108,14 +106,14 @@ class DiagnosticsViewModel
                     }
                 result.fold(
                     onSuccess = { file ->
-                        _exportResult.send(ExportResult.Success(fileName = file.name))
+                        _exportResult.emit(ExportResult.Success(fileName = file.name))
                     },
                     onFailure = { throwable ->
                         val error =
                             FrameportError.Unknown(
                                 message = throwable.message ?: "Export failed",
                             )
-                        _exportResult.send(ExportResult.Failure(error = error))
+                        _exportResult.emit(ExportResult.Failure(error = error))
                     },
                 )
             }
