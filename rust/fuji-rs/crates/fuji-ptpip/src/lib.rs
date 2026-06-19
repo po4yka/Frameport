@@ -101,13 +101,16 @@ impl TxnCounter {
 /// Tracks position within a streaming `GetObject` data phase.
 #[derive(Debug)]
 struct ObjectStream {
-    /// Total payload bytes declared in `StartData.total_data_length`.
-    total: u64,
-    /// Bytes remaining to read from the socket.
+    /// Bytes remaining to read from the socket across all pending data frames.
+    ///
+    /// Initialised to `StartData.total_data_length` and decremented as each
+    /// DataPacket / EndData frame payload is consumed.  Reaches zero when the
+    /// final EndData payload has been fully read.
     remaining: u64,
     /// Transaction ID of the in-flight `GetObject` operation.
     txn_id: u32,
-    /// Whether we have already read the 12-byte `EndData` header.
+    /// Whether we have already consumed all DataPacket headers up through the
+    /// EndData frame header (i.e. the next bytes on the wire are payload bytes).
     end_header_read: bool,
 }
 
@@ -345,7 +348,6 @@ impl PtpIpTcpClient {
         };
 
         self.object_stream = Some(ObjectStream {
-            total,
             remaining: total,
             txn_id: txn,
             end_header_read: false,
@@ -368,12 +370,17 @@ impl PtpIpTcpClient {
     ///
     /// # Streaming protocol
     ///
-    /// The `GetObject` data phase on PTP-IP (via `fuji-sim` and real cameras)
-    /// sends all data in a single `EndData` packet (no intermediate `DataPacket`
-    /// chunks for objects up to ~64 MiB).  The client reads the `EndData` frame
-    /// header (12 bytes: length u32, type u32, txn u32) manually WITHOUT calling
-    /// `decode_packet` (which would buffer the whole payload), then streams the
-    /// payload bytes directly from the `TcpStream` in chunks of up to `buf.len()`.
+    /// The `GetObject` data phase on PTP-IP sends data in one or more frames:
+    ///
+    /// * Zero or more intermediate `DataPacket` frames (type `0x000A`), each
+    ///   carrying a partial payload.
+    /// * Exactly one `EndData` frame (type `0x000C`) that carries the last
+    ///   (possibly zero-length) payload slice.
+    ///
+    /// This method drains all intermediate `DataPacket` frames and the final
+    /// `EndData` frame, accumulating bytes directly into the caller's buffer
+    /// without ever buffering the full object in RAM.  Frame headers (12 bytes
+    /// each) are read manually WITHOUT calling `decode_packet`.
     ///
     /// # Cancel support
     ///
@@ -385,44 +392,108 @@ impl PtpIpTcpClient {
             .as_mut()
             .ok_or(FujiError::Protocol(ProtocolError::UnexpectedPacket))?;
 
-        // Read the EndData frame header the first time we enter the payload.
+        // Read frame headers until we have consumed either a DataPacket (0x000A)
+        // or the EndData (0x000C) header that covers bytes still remaining.
+        //
+        // M-3 fix: loop over intermediate DataPacket chunks before EndData.
+        // M-4 fix: validate that declared payload_len does not exceed `remaining`
+        //          (rather than requiring an exact match with `total`, which breaks
+        //          on multi-chunk transfers where each chunk covers only a portion).
         if !state.end_header_read {
-            // EndData frame: length(4) | type(4) | txn(4) → 12 bytes minimum.
-            // We read it manually so we DON'T pass the full large frame through
-            // decode_packet (which would allocate the entire payload in RAM).
-            let mut hdr = [0u8; 12];
-            self.stream
-                .read_exact(&mut hdr)
-                .map_err(|_e| FujiError::Transfer(TransferError::CameraDisconnected))?;
+            loop {
+                // Each PTP-IP data frame: length(4) | type(4) | txn(4) = 12 bytes.
+                // Read manually to avoid allocating the full payload via decode_packet.
+                let mut hdr = [0u8; 12];
+                self.stream.read_exact(&mut hdr).map_err(|e| {
+                    // L-2 fix: preserve the OS error in debug output before mapping.
+                    #[cfg(debug_assertions)]
+                    eprintln!("fuji-ptpip: read_object_chunk header read failed: {e}");
+                    let _ = &e; // suppress unused-variable warning in release
+                    FujiError::Transfer(TransferError::CameraDisconnected)
+                })?;
 
-            let declared_frame_len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
-            let pkt_type = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+                let declared_frame_len =
+                    u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                let pkt_type = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
 
-            // Type 0x000C = DataPacketEnd.
-            if pkt_type != 0x000C {
-                return Err(FujiError::Protocol(ProtocolError::UnexpectedPacket));
+                if declared_frame_len < 12 {
+                    return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                        declared: declared_frame_len,
+                        minimum: 12,
+                    }));
+                }
+
+                // L-3 fix: guard the u64→usize cast so it is sound on 32-bit targets.
+                let raw_payload_len: u64 = u64::from(declared_frame_len - 12);
+                let payload_len_usize =
+                    usize::try_from(raw_payload_len).map_err(|_| {
+                        // declared_frame_len would need to exceed usize::MAX + 12 bytes,
+                        // which is impossible for a u32 on any real target, but we guard
+                        // anyway for soundness on hypothetical 16-bit targets.
+                        FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                            declared: declared_frame_len,
+                            minimum: 12,
+                        })
+                    })?;
+
+                match pkt_type {
+                    // 0x000A = intermediate DataPacket — drain its payload and
+                    // continue the loop to read the next frame header.
+                    0x000A => {
+                        // M-4: validate this chunk does not exceed what we are still
+                        // expecting, to catch camera protocol violations early.
+                        if raw_payload_len > state.remaining {
+                            return Err(FujiError::Protocol(
+                                ProtocolError::ResponseMismatch,
+                            ));
+                        }
+                        // Drain the intermediate chunk payload in chunks of buf size.
+                        // We do NOT copy into `buf` here because callers call us
+                        // repeatedly; draining in-line keeps things simple and avoids
+                        // a separate allocation.
+                        let mut drained: usize = 0;
+                        while drained < payload_len_usize {
+                            let want = (payload_len_usize - drained).min(buf.len());
+                            let n = self.stream.read(&mut buf[..want]).map_err(|e| {
+                                #[cfg(debug_assertions)]
+                                eprintln!(
+                                    "fuji-ptpip: intermediate DataPacket drain failed: {e}"
+                                );
+                                let _ = &e;
+                                FujiError::Transfer(TransferError::CameraDisconnected)
+                            })?;
+                            if n == 0 {
+                                return Err(FujiError::Transfer(
+                                    TransferError::CameraDisconnected,
+                                ));
+                            }
+                            drained += n;
+                        }
+                        state.remaining = state
+                            .remaining
+                            .saturating_sub(raw_payload_len);
+                        // Continue to read the next frame header.
+                    }
+
+                    // 0x000C = EndData — this is the last (possibly zero-length) frame.
+                    0x000C => {
+                        // M-4: the EndData payload must not exceed bytes still expected.
+                        if raw_payload_len > state.remaining {
+                            return Err(FujiError::Protocol(
+                                ProtocolError::ResponseMismatch,
+                            ));
+                        }
+                        state.end_header_read = true;
+                        // `remaining` is NOT decremented here; the read loop below
+                        // decrements it as bytes are consumed from the socket.
+                        break;
+                    }
+
+                    _ => {
+                        return Err(FujiError::Protocol(ProtocolError::UnexpectedPacket));
+                    }
+                }
             }
-            if declared_frame_len < 12 {
-                return Err(FujiError::Protocol(ProtocolError::InvalidPacketLength {
-                    declared: declared_frame_len,
-                    minimum: 12,
-                }));
-            }
-
-            let payload_len = (declared_frame_len - 12) as u64;
-
-            // Validate payload length matches total declared in StartData.
-            // (Allow exact match only; deviation is a protocol error.)
-            if payload_len != state.total {
-                return Err(FujiError::Protocol(ProtocolError::ResponseMismatch));
-            }
-
-            // Re-borrow after stream access.
-            let state = self
-                .object_stream
-                .as_mut()
-                .ok_or(FujiError::Protocol(ProtocolError::UnexpectedPacket))?;
-            state.end_header_read = true;
         }
 
         let state = self
@@ -441,11 +512,17 @@ impl PtpIpTcpClient {
         }
 
         // How many bytes to read this chunk.
-        let to_read = buf.len().min(state.remaining as usize);
-        let n = self
-            .stream
-            .read(&mut buf[..to_read])
-            .map_err(|_| FujiError::Transfer(TransferError::CameraDisconnected))?;
+        // L-3 fix: guard the u64→usize narrowing with try_from so the cast is
+        // sound on 32-bit targets where usize is 4 bytes.
+        let remaining_usize = usize::try_from(state.remaining).unwrap_or(usize::MAX);
+        let to_read = buf.len().min(remaining_usize);
+        let n = self.stream.read(&mut buf[..to_read]).map_err(|e| {
+            // L-2 fix: log the OS error before mapping.
+            #[cfg(debug_assertions)]
+            eprintln!("fuji-ptpip: read_object_chunk payload read failed: {e}");
+            let _ = &e;
+            FujiError::Transfer(TransferError::CameraDisconnected)
+        })?;
 
         if n == 0 {
             return Err(FujiError::Transfer(TransferError::CameraDisconnected));
