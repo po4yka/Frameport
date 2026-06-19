@@ -301,6 +301,10 @@ class AndroidCameraUsbConnector
                 _state.value = UsbSessionState.PermissionPending
                 Timber.tag(TAG).d("requestPermission: requesting permission")
 
+                // FLAG_IMMUTABLE: the Intent's extras are fixed at creation time and
+                // never modified by UsbManager before delivery, so mutability is not needed.
+                // FLAG_MUTABLE is only required when the OS must fill in extras (e.g. Alarms);
+                // using it unnecessarily widens the attack surface on API 31+ (M-15).
                 val permissionIntent =
                     android.app.PendingIntent.getBroadcast(
                         context,
@@ -308,7 +312,7 @@ class AndroidCameraUsbConnector
                         Intent(ACTION_USB_PERMISSION).apply {
                             setPackage(context.packageName)
                         },
-                        android.app.PendingIntent.FLAG_MUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+                        android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
                     )
                 usbManager.requestPermission(usbDevice, permissionIntent)
 
