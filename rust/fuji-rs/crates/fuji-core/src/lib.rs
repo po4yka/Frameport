@@ -732,6 +732,20 @@ pub enum FujiError {
     NotInitialized,
     #[error("operation is not implemented: {0}")]
     NotImplemented(&'static str),
+    /// Returned by `fuji-ffi` / `JniNativeFujiSdk` when the caller supplies a
+    /// session handle that the native SDK does not recognise.
+    ///
+    /// **Overlap note (M-16):** `Protocol(ProtocolError::SessionNotOpen)` covers
+    /// the camera-protocol case where the PTP session was never established or
+    /// has already been closed at the wire level, whereas `SessionNotFound` covers
+    /// the SDK-handle case (unknown `i64` key in the session registry).  The two
+    /// conditions are logically distinct but callers sometimes conflate them.
+    /// Planned consolidation: once the session-registry layer is stable, replace
+    /// `SessionNotFound` with a `Session(SessionError::HandleNotFound { id: i64 })`
+    /// variant so both cases live under the same typed family.
+    /// TODO(audit): M-16 — consolidate SessionNotFound + ProtocolError::SessionNotOpen
+    /// into a single Session sub-error family; requires coordinated change across
+    /// fuji-ffi, fuji-ptpip, and the Kotlin NativeFujiSdk bridge.
     #[error("session was not found: {0}")]
     SessionNotFound(i64),
     #[error("protocol is unavailable: {0}")]
@@ -767,6 +781,17 @@ pub type FujiResult<T> = Result<T, FujiError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Compile-time Send + Sync assertions ───────────────────────────────────
+    // These functions are never called at runtime; they exist solely to produce
+    // a compile error if FujiError loses Send or Sync, preventing silent
+    // regressions when new variants are added.  The generic bound is evaluated
+    // at monomorphisation time — no external crate required.
+    fn _assert_send_sync<T: Send + Sync>() {}
+    #[allow(dead_code)]
+    fn _fuji_error_is_send_sync() {
+        _assert_send_sync::<FujiError>();
+    }
 
     // ── Non-regression (original tests) ───────────────────────────────────────
 
