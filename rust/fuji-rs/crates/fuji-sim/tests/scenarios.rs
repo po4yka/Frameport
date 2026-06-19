@@ -676,12 +676,27 @@ async fn premature_disconnect() {
         let event_ack = recv_packet(&mut event_stream).await;
         assert_eq!(event_ack, PtpIpPacket::InitEventAck);
 
-        // ── Step 3: Send CloseSession immediately (skipping OpenSession) ───────
-        // The server's dispatch loop handles CloseSession as a valid opcode and
-        // returns OK, then closes the connection from the server side.
-        // We send CloseSession as the first operation (without OpenSession first).
-        // The server replies OK and drops the connection. We then try to read
-        // again — must see EOF.
+        // ── Step 3: OpenSession then CloseSession immediately ─────────────────
+        // M-8: the session-open guard requires OpenSession before any other
+        // operation; CloseSession without a prior OpenSession now returns
+        // SESSION_NOT_OPEN (0x2003) instead of OK.  Send OpenSession first so
+        // CloseSession returns OK and the server closes the connection cleanly.
+        send_packet(
+            &mut cmd_stream,
+            &PtpIpPacket::OperationRequest {
+                data_phase: 1,
+                opcode: opcode::OPEN_SESSION,
+                transaction_id: 1,
+                params: vec![fuji_ptp::constants::SESSION_ID],
+            },
+        )
+        .await;
+        let open_resp = recv_packet(&mut cmd_stream).await;
+        assert!(
+            matches!(&open_resp, PtpIpPacket::OperationResponse { response_code, .. } if *response_code == response_code::OK),
+            "OpenSession must return OK, got {open_resp:?}"
+        );
+
         send_packet(
             &mut cmd_stream,
             &PtpIpPacket::OperationRequest {

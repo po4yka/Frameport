@@ -86,10 +86,21 @@ pub enum DispatchResult {
 ///
 /// The server creates one `DispatchState` per accepted connection and passes it
 /// through each call to `dispatch_operation`.
+///
+/// M-8: `session_open` tracks whether `OpenSession` has been called.  Operations
+/// other than `GetDeviceInfo` and `OpenSession` return `SESSION_NOT_OPEN` (0x2003)
+/// when `session_open` is `false`, matching the PTP spec invariant and preventing
+/// false-green CI where operations succeed without a prior `OpenSession`.
 #[derive(Debug)]
 pub struct DispatchState {
     /// How many more BUSY responses to emit before returning OK on mode write.
     pub remaining_busy: u32,
+    /// Whether `OpenSession` has been called on this connection.
+    ///
+    /// Set to `true` by the `OpenSession` arm; never reset (CloseSession ends the
+    /// TCP session entirely).  Operations other than `GetDeviceInfo` and `OpenSession`
+    /// return `SESSION_NOT_OPEN` (0x2003) when this is `false`.
+    pub session_open: bool,
 }
 
 impl DispatchState {
@@ -97,6 +108,7 @@ impl DispatchState {
     pub fn new(config: &ServerConfig) -> Self {
         Self {
             remaining_busy: config.busy_count,
+            session_open: false,
         }
     }
 }
@@ -120,6 +132,24 @@ pub fn dispatch_operation(
     state: &mut DispatchState,
     config: &ServerConfig,
 ) -> Result<DispatchResult, SimError> {
+    // M-8: session-open guard.
+    // GetDeviceInfo (0x1001) and OpenSession (0x1002) are the only operations
+    // permitted before OpenSession has been called, per ISO 15740 §10.1.
+    // All other operations return SESSION_NOT_OPEN (0x2003) when session_open
+    // is false.  This prevents false-green CI where operations succeed without
+    // a prior OpenSession call.
+    let requires_open_session = opcode_val != opcode::GET_DEVICE_INFO
+        && opcode_val != opcode::OPEN_SESSION;
+    if requires_open_session && !state.session_open {
+        return Ok(DispatchResult::Packets(vec![
+            PtpIpPacket::OperationResponse {
+                response_code: response_code::SESSION_NOT_OPEN,
+                transaction_id,
+                result_params: vec![],
+            },
+        ]));
+    }
+
     match opcode_val {
         // ── GetDeviceInfo (0x1001) ────────────────────────────────────────────
         // Returns a minimal DeviceInfo dataset in the section 4.9 data phase.
@@ -143,6 +173,8 @@ pub fn dispatch_operation(
                     params.first()
                 )));
             }
+            // M-8: mark session as open so subsequent operations are permitted.
+            state.session_open = true;
             Ok(DispatchResult::Packets(vec![ok_response(transaction_id)]))
         }
 
@@ -671,6 +703,30 @@ mod tests {
         }
     }
 
+    /// Calls OpenSession on `state` so that subsequent operations are permitted.
+    ///
+    /// M-8: tests that exercise operations other than GetDeviceInfo/OpenSession
+    /// must call this helper first; without it the session-open guard returns
+    /// SESSION_NOT_OPEN (0x2003) before the operation logic runs.
+    fn open_session_on(state: &mut DispatchState, config: &ServerConfig) {
+        let pkts = unwrap_packets(dispatch_operation(
+            opcode::OPEN_SESSION,
+            0,
+            &[fuji_ptp::constants::SESSION_ID],
+            None,
+            state,
+            config,
+        ));
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "open_session_on: OpenSession must return OK; got {pkts:?}"
+        );
+    }
+
     #[test]
     fn open_session_returns_ok() {
         let config = default_config();
@@ -718,6 +774,7 @@ mod tests {
     fn set_device_prop_busy_then_ok() {
         let config = FakeCameraBuilder::new().busy_count(2).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
 
         // IMAGE_GET_VERSION (0xDF21) is UINT32 — payload must be exactly 4 bytes.
         // master-constants.md §3b. [H]
@@ -763,6 +820,7 @@ mod tests {
             .fatal_on_set_mode(Some(FATAL_AUTH_FAILURE))
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
             1,
@@ -782,6 +840,7 @@ mod tests {
     fn get_object_count_returns_configured_value() {
         let config = FakeCameraBuilder::new().object_count(7).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::GET_DEVICE_PROP_VALUE,
             1,
@@ -803,6 +862,7 @@ mod tests {
     fn get_events_list_returns_empty() {
         let config = default_config();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::GET_DEVICE_PROP_VALUE,
             1,
@@ -823,6 +883,7 @@ mod tests {
     fn unknown_opcode_returns_operation_not_supported() {
         let config = default_config();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             0xFFFF,
             99,
@@ -853,6 +914,7 @@ mod tests {
             )
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::GET_OBJECT_INFO,
             1,
@@ -883,6 +945,7 @@ mod tests {
     fn get_object_info_returns_invalid_handle_for_missing_object() {
         let config = FakeCameraBuilder::new().build(); // no objects
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::GET_OBJECT_INFO,
             1,
@@ -912,6 +975,7 @@ mod tests {
             .with_malformed_object_info_fault(1)
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::GET_OBJECT_INFO,
             1,
@@ -953,6 +1017,7 @@ mod tests {
             )
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::GET_THUMB,
             1,
@@ -985,6 +1050,7 @@ mod tests {
             )
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let result = dispatch_operation(opcode::GET_OBJECT, 1, &[1u32], None, &mut state, &config)
             .expect("dispatch must succeed");
         match result {
@@ -1021,6 +1087,7 @@ mod tests {
             .with_size_mismatch_fault(1)
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let result = dispatch_operation(opcode::GET_OBJECT, 1, &[1u32], None, &mut state, &config)
             .expect("dispatch must succeed");
         match result {
@@ -1054,6 +1121,7 @@ mod tests {
             .with_connection_reset_fault(1, 512)
             .build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let result = dispatch_operation(opcode::GET_OBJECT, 1, &[1u32], None, &mut state, &config)
             .expect("dispatch must succeed");
         match result {
@@ -1076,6 +1144,7 @@ mod tests {
     fn set_client_state_well_formed_returns_ok() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         // UINT16 LE payload: value=1 (IMAGE_RECEIVE mode)
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
@@ -1104,6 +1173,7 @@ mod tests {
     fn set_client_state_wrong_width_returns_parameter_not_supported() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         // 3-byte payload for a UINT16 property — wrong width.
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
@@ -1130,6 +1200,7 @@ mod tests {
     fn set_client_state_empty_payload_returns_parameter_not_supported() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
             1,
@@ -1158,6 +1229,7 @@ mod tests {
     fn set_client_state_no_data_phase_is_protocol_violation() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let result = dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
             1,
@@ -1180,6 +1252,7 @@ mod tests {
     fn set_image_get_version_wrong_width_returns_parameter_not_supported() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         // 2-byte payload for a UINT32 property — wrong width.
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
@@ -1207,6 +1280,7 @@ mod tests {
     fn set_enable_correct_file_size_wrong_width_returns_parameter_not_supported() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         // 1-byte payload for a UINT16 property — wrong width.
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
@@ -1234,6 +1308,7 @@ mod tests {
     fn set_enable_correct_file_size_well_formed_returns_ok() {
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
             1,
@@ -1261,6 +1336,7 @@ mod tests {
         // busy_count=3 — if validation were skipped, we'd get BUSY instead.
         let config = FakeCameraBuilder::new().busy_count(3).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         // 3-byte payload for UINT16 property — wrong width.
         let pkts = unwrap_packets(dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
@@ -1285,6 +1361,126 @@ mod tests {
         );
     }
 
+    // ── M-8: session-open guard tests ────────────────────────────────────────
+
+    /// GetDeviceInfo is permitted before OpenSession (no session required).
+    #[test]
+    fn get_device_info_allowed_before_open_session() {
+        let config = default_config();
+        let mut state = DispatchState::new(&config);
+        assert!(!state.session_open, "session must start closed");
+        let pkts = unwrap_packets(dispatch_operation(
+            opcode::GET_DEVICE_INFO,
+            1,
+            &[],
+            None,
+            &mut state,
+            &config,
+        ));
+        // StartData, EndData, OK — not SESSION_NOT_OPEN.
+        assert_eq!(pkts.len(), 3);
+        assert!(
+            !matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::SESSION_NOT_OPEN
+            ),
+            "GetDeviceInfo must not return SESSION_NOT_OPEN before OpenSession"
+        );
+    }
+
+    /// Any operation other than GetDeviceInfo/OpenSession returns SESSION_NOT_OPEN
+    /// (0x2003) when no OpenSession has been called.
+    #[test]
+    fn operation_before_open_session_returns_session_not_open() {
+        let config = default_config();
+        let mut state = DispatchState::new(&config);
+        assert!(!state.session_open);
+
+        // CloseSession without OpenSession must return SESSION_NOT_OPEN.
+        let pkts = unwrap_packets(dispatch_operation(
+            opcode::CLOSE_SESSION,
+            1,
+            &[],
+            None,
+            &mut state,
+            &config,
+        ));
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::SESSION_NOT_OPEN
+            ),
+            "CloseSession before OpenSession must return SESSION_NOT_OPEN; got {pkts:?}"
+        );
+
+        // GetDevicePropValue without OpenSession must also return SESSION_NOT_OPEN.
+        let pkts2 = unwrap_packets(dispatch_operation(
+            opcode::GET_DEVICE_PROP_VALUE,
+            2,
+            &[prop_code::OBJECT_COUNT as u32],
+            None,
+            &mut state,
+            &config,
+        ));
+        assert!(
+            matches!(
+                &pkts2[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::SESSION_NOT_OPEN
+            ),
+            "GetDevicePropValue before OpenSession must return SESSION_NOT_OPEN; got {pkts2:?}"
+        );
+
+        // session_open must still be false — guard must not mutate state on rejection.
+        assert!(!state.session_open, "session_open must remain false after rejected operations");
+    }
+
+    /// After a successful OpenSession, subsequent operations are permitted normally.
+    #[test]
+    fn operations_succeed_after_open_session() {
+        let config = default_config();
+        let mut state = DispatchState::new(&config);
+
+        // OpenSession first.
+        let pkts = unwrap_packets(dispatch_operation(
+            opcode::OPEN_SESSION,
+            0,
+            &[fuji_ptp::constants::SESSION_ID],
+            None,
+            &mut state,
+            &config,
+        ));
+        assert!(
+            matches!(
+                &pkts[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "OpenSession must return OK; got {pkts:?}"
+        );
+        assert!(state.session_open, "session_open must be true after OpenSession");
+
+        // CloseSession now permitted.
+        let pkts2 = unwrap_packets(dispatch_operation(
+            opcode::CLOSE_SESSION,
+            1,
+            &[],
+            None,
+            &mut state,
+            &config,
+        ));
+        assert!(
+            matches!(
+                &pkts2[0],
+                PtpIpPacket::OperationResponse { response_code, .. }
+                if *response_code == response_code::OK
+            ),
+            "CloseSession after OpenSession must return OK; got {pkts2:?}"
+        );
+    }
+
     /// An unknown property code with no data phase passes through to BUSY/OK logic
     /// (unknown properties are not validated for width).
     ///
@@ -1294,6 +1490,7 @@ mod tests {
         // Unknown property 0xFFFF — not in the known-width table.
         let config = FakeCameraBuilder::new().busy_count(0).build();
         let mut state = DispatchState::new(&config);
+        open_session_on(&mut state, &config);
         let result = dispatch_operation(
             opcode::SET_DEVICE_PROP_VALUE,
             1,
