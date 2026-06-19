@@ -138,8 +138,8 @@ pub fn dispatch_operation(
     // All other operations return SESSION_NOT_OPEN (0x2003) when session_open
     // is false.  This prevents false-green CI where operations succeed without
     // a prior OpenSession call.
-    let requires_open_session = opcode_val != opcode::GET_DEVICE_INFO
-        && opcode_val != opcode::OPEN_SESSION;
+    let requires_open_session =
+        opcode_val != opcode::GET_DEVICE_INFO && opcode_val != opcode::OPEN_SESSION;
     if requires_open_session && !state.session_open {
         return Ok(DispatchResult::Packets(vec![
             PtpIpPacket::OperationResponse {
@@ -1434,7 +1434,10 @@ mod tests {
         );
 
         // session_open must still be false — guard must not mutate state on rejection.
-        assert!(!state.session_open, "session_open must remain false after rejected operations");
+        assert!(
+            !state.session_open,
+            "session_open must remain false after rejected operations"
+        );
     }
 
     /// After a successful OpenSession, subsequent operations are permitted normally.
@@ -1460,7 +1463,10 @@ mod tests {
             ),
             "OpenSession must return OK; got {pkts:?}"
         );
-        assert!(state.session_open, "session_open must be true after OpenSession");
+        assert!(
+            state.session_open,
+            "session_open must be true after OpenSession"
+        );
 
         // CloseSession now permitted.
         let pkts2 = unwrap_packets(dispatch_operation(

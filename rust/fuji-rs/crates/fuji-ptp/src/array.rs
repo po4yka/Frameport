@@ -68,8 +68,7 @@ pub fn decode_u32_array(buf: &[u8], offset: usize) -> Result<(Vec<u32>, usize), 
 /// In practice PTP arrays are orders of magnitude smaller, so this is a
 /// programming error rather than a recoverable condition.
 pub fn encode_u32_array(elements: &[u32]) -> Vec<u8> {
-    let count = u32::try_from(elements.len())
-        .expect("PTP array element count exceeds u32::MAX");
+    let count = u32::try_from(elements.len()).expect("PTP array element count exceeds u32::MAX");
     let mut out = Vec::with_capacity(4 + elements.len() * 4);
     out.extend_from_slice(&count.to_le_bytes());
     for elem in elements {

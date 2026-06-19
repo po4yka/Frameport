@@ -412,8 +412,7 @@ impl PtpIpTcpClient {
                     FujiError::Transfer(TransferError::CameraDisconnected)
                 })?;
 
-                let declared_frame_len =
-                    u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+                let declared_frame_len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
                 let pkt_type = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
 
                 if declared_frame_len < 12 {
@@ -425,16 +424,15 @@ impl PtpIpTcpClient {
 
                 // L-3 fix: guard the u64→usize cast so it is sound on 32-bit targets.
                 let raw_payload_len: u64 = u64::from(declared_frame_len - 12);
-                let payload_len_usize =
-                    usize::try_from(raw_payload_len).map_err(|_| {
-                        // declared_frame_len would need to exceed usize::MAX + 12 bytes,
-                        // which is impossible for a u32 on any real target, but we guard
-                        // anyway for soundness on hypothetical 16-bit targets.
-                        FujiError::Protocol(ProtocolError::InvalidPacketLength {
-                            declared: declared_frame_len,
-                            minimum: 12,
-                        })
-                    })?;
+                let payload_len_usize = usize::try_from(raw_payload_len).map_err(|_| {
+                    // declared_frame_len would need to exceed usize::MAX + 12 bytes,
+                    // which is impossible for a u32 on any real target, but we guard
+                    // anyway for soundness on hypothetical 16-bit targets.
+                    FujiError::Protocol(ProtocolError::InvalidPacketLength {
+                        declared: declared_frame_len,
+                        minimum: 12,
+                    })
+                })?;
 
                 match pkt_type {
                     // 0x000A = intermediate DataPacket — drain its payload and
@@ -443,9 +441,7 @@ impl PtpIpTcpClient {
                         // M-4: validate this chunk does not exceed what we are still
                         // expecting, to catch camera protocol violations early.
                         if raw_payload_len > state.remaining {
-                            return Err(FujiError::Protocol(
-                                ProtocolError::ResponseMismatch,
-                            ));
+                            return Err(FujiError::Protocol(ProtocolError::ResponseMismatch));
                         }
                         // Drain the intermediate chunk payload in chunks of buf size.
                         // We do NOT copy into `buf` here because callers call us
@@ -456,22 +452,16 @@ impl PtpIpTcpClient {
                             let want = (payload_len_usize - drained).min(buf.len());
                             let n = self.stream.read(&mut buf[..want]).map_err(|e| {
                                 #[cfg(debug_assertions)]
-                                eprintln!(
-                                    "fuji-ptpip: intermediate DataPacket drain failed: {e}"
-                                );
+                                eprintln!("fuji-ptpip: intermediate DataPacket drain failed: {e}");
                                 let _ = &e;
                                 FujiError::Transfer(TransferError::CameraDisconnected)
                             })?;
                             if n == 0 {
-                                return Err(FujiError::Transfer(
-                                    TransferError::CameraDisconnected,
-                                ));
+                                return Err(FujiError::Transfer(TransferError::CameraDisconnected));
                             }
                             drained += n;
                         }
-                        state.remaining = state
-                            .remaining
-                            .saturating_sub(raw_payload_len);
+                        state.remaining = state.remaining.saturating_sub(raw_payload_len);
                         // Continue to read the next frame header.
                     }
 
@@ -479,9 +469,7 @@ impl PtpIpTcpClient {
                     0x000C => {
                         // M-4: the EndData payload must not exceed bytes still expected.
                         if raw_payload_len > state.remaining {
-                            return Err(FujiError::Protocol(
-                                ProtocolError::ResponseMismatch,
-                            ));
+                            return Err(FujiError::Protocol(ProtocolError::ResponseMismatch));
                         }
                         state.end_header_read = true;
                         // `remaining` is NOT decremented here; the read loop below
