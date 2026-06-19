@@ -55,31 +55,20 @@ allow = [
 # [bans] — duplicate-crate and forbidden-crate policy
 # ---------------------------------------------------------------------------
 [bans]
-# Warn on multiple versions rather than hard-deny, because some duplicates
-# are forced by pinned third-party dependencies (e.g. jni 0.21.1 pulls
-# thiserror 1.x while the workspace uses thiserror 2.x).  Upgrade to "deny"
-# once the tree is stable enough to enforce single-version invariants.
-multiple-versions = "warn"
+# Hard-deny duplicate versions to enforce a single-version invariant. The
+# previous jni-0.21-era skews (thiserror 1.x, windows-sys 0.45) are gone under
+# jni 0.22.4; if a future dependency reintroduces a duplicate, add a documented
+# skip entry below rather than silently downgrading this to "warn".
+multiple-versions = "deny"
 
 # Crates explicitly forbidden in this workspace.
 # Add entries here as policy is established (e.g. crates with known
 # supply-chain risk or incompatible licenses).
 deny = []
 
-# Known duplicate-version pairs forced by jni 0.21.1's transitive deps.
-# Each entry documents WHICH upstream dependency causes the skew, so the
-# skip can be removed when that dep is updated.
-skip = [
-    # jni 0.21.1 depends on thiserror 1.0.x; the workspace uses thiserror 2.x.
-    # Remove these two entries when jni is upgraded to a version that uses
-    # thiserror 2.x.
-    { name = "thiserror", version = "1" },
-    { name = "thiserror-impl", version = "1" },
-    # jni 0.21.1 (via its windows build path) depends on windows-sys 0.45.x;
-    # the rest of the tree (tokio, rustix, mio) uses windows-sys 0.61.x.
-    # Remove when jni is upgraded.
-    { name = "windows-sys", version = "0.45" },
-]
+# Documented duplicate-version exceptions. Empty under jni 0.22.4; add an entry
+# (with the upstream cause) only when a real duplicate cannot be deduped.
+skip = []
 
 # ---------------------------------------------------------------------------
 # [sources] — crates.io only; no git sources, no private registries
