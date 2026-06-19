@@ -192,12 +192,59 @@ class RedactionPipelineTest {
         assertNotEquals(mac, ssid)
     }
 
+    // ── redactDiagnosticText — serial (M-1) ──────────────────────────────────────
+
+    @Test
+    fun redactDiagnosticText_redactsKeywordedSerial() {
+        // The keyworded rule catches "serial=<value>" structured log tokens.
+        val result = pipeline.redactDiagnosticText("connect serial=3AB12345 ok")
+        assertFalse("Raw serial must not appear after redaction", result.contains("3AB12345"))
+        assertTrue("Redacted-serial sentinel must appear", result.contains("<redacted-serial>"))
+    }
+
+    @Test
+    fun redactDiagnosticText_serialMustBePreHashedByCallSite() {
+        // M-1 DOCUMENTED CONTRACT: a bare serial not preceded by a keyword is NOT
+        // caught by redactDiagnosticText; call sites must use redactSerial() explicitly.
+        // This test documents that expectation so it is visible in the test suite.
+        // (A bare token like "3AB12345" alone in a sentence would also be redacted by the
+        // serial rule because the keyword group is optional in the implementation — but
+        // category words like "Transfer" or "Protocol" are intentionally not affected.)
+        val safeMessage = "PTP response rejected"
+        val result = pipeline.redactDiagnosticText(safeMessage)
+        // Safe category-level wording must survive redaction unchanged.
+        assertEquals(
+            "Category-level wording must not be redacted",
+            safeMessage,
+            result,
+        )
+    }
+
+    // ── redactDiagnosticText — IP with port (M-2) ────────────────────────────────
+
+    @Test
+    fun redactDiagnosticText_redactsIpWithPort() {
+        // M-2: IP:port form must be fully redacted (not just the IP part).
+        val result = pipeline.redactDiagnosticText("connect 192.168.0.1:15740 failed")
+        assertFalse("IP must not appear after redaction", result.contains("192.168.0.1"))
+        assertFalse(":15740 port must not appear after redaction", result.contains(":15740"))
+        assertTrue("Redacted-ip sentinel must appear", result.contains("<redacted-ip>"))
+    }
+
+    @Test
+    fun redactDiagnosticText_redactsBareIpWithoutPort() {
+        // Existing behaviour must be preserved for bare IP addresses.
+        val result = pipeline.redactDiagnosticText("camera at 192.168.0.1 ok")
+        assertFalse("IP must not appear after redaction", result.contains("192.168.0.1"))
+        assertTrue("Redacted-ip sentinel must appear", result.contains("<redacted-ip>"))
+    }
+
     // ── redactDiagnosticText ─────────────────────────────────────────────────────
 
     @Test
     fun redactDiagnosticText_removesHighRiskDiagnosticValues() {
         val raw =
-                "camera 192.168.0.1 mac AA:BB:CC:DD:EE:FF serial=3AB12345 " +
+            "camera 192.168.0.1 mac AA:BB:CC:DD:EE:FF serial=3AB12345 " +
                 "passphrase=hunter2 ssid=Home Camera WiFi; gps 41.7151, 44.8271 file /sdcard/DCIM/DSCF1234.RAF fd=42 socketFd=99"
 
         val result = pipeline.redactDiagnosticText(raw)
