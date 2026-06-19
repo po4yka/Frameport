@@ -45,5 +45,7 @@ data class SessionProgressEntity(
 internal object SessionProgressState {
     const val IN_PROGRESS = "in_progress"
     const val COMPLETED = "completed"
-    const val INTERRUPTED = "interrupted"
+    // INTERRUPTED was removed: no writer existed for this state. If a future milestone
+    // needs to distinguish a user-cancelled transfer from a process-death transfer, add
+    // the constant back together with the DAO write site in the same commit.
 }
