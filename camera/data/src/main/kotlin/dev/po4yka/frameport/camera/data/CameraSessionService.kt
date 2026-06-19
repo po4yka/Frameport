@@ -17,9 +17,10 @@ import dev.po4yka.frameport.camera.api.ErrorLayer
 import dev.po4yka.frameport.camera.api.TransferProgress
 import dev.po4yka.frameport.camera.api.defaultCategory
 import dev.po4yka.frameport.camera.api.diagnosticEvent
+import dev.po4yka.frameport.core.common.di.IoDispatcher
 import dev.po4yka.frameport.core.storage.session.SessionProgressStore
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.emptyFlow
@@ -63,9 +64,19 @@ class CameraSessionService : Service() {
     @Inject
     lateinit var sessionProgressStore: SessionProgressStore
 
+    // Injected IO dispatcher: protocol/service work (state collection, progress persistence,
+    // interrupted-session checks) is I/O-bound and must not run on Main. Dispatchers.Main.immediate
+    // was incorrect here because it would run coroutines on the main thread whenever the main
+    // looper is idle, blocking UI for synchronous database or storage calls.
+    @Inject
+    @IoDispatcher
+    lateinit var ioDispatcher: CoroutineDispatcher
+
     // Service coroutine scope: SupervisorJob so individual child failures don't cancel the scope.
+    // Uses ioDispatcher (injected) so protocol/storage work never runs on the main thread.
     // Cancelled in onDestroy to stop all collections cleanly.
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // Note: serviceScope is created lazily after injection so ioDispatcher is available.
+    private val serviceScope by lazy { CoroutineScope(SupervisorJob() + ioDispatcher) }
 
     private var controller: CameraSessionController? = null
 
@@ -91,9 +102,12 @@ class CameraSessionService : Service() {
         )
 
         // Step 3: wire the session controller (G5/G6).
-        // progressFlow is emptyFlow here — the stub Rust transfer emits nothing yet.
-        // When the real transfer path is wired in M11+, replace emptyFlow() with the
-        // actual Flow<TransferProgress> from TransferRepository.
+        // TODO(audit): progressFlow is emptyFlow() because TransferRepository.importObject
+        //   returns a per-import Flow<ImportState>, not a persistent Flow<TransferProgress>
+        //   available at service-start time. The correct source is a session-scoped
+        //   SharedFlow<TransferProgress> that TransferRepositoryImpl exposes and into which
+        //   each importObject call emits its progress events. Wire this in M11 when
+        //   TransferRepositoryImpl gains a session-scoped progress bus.
         val progressFlow = emptyFlow<TransferProgress>()
 
         // Session this service instance manages (0 = unknown; the stub session uses SessionId(0L)).

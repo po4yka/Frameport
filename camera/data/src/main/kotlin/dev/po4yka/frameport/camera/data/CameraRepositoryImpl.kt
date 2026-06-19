@@ -75,18 +75,24 @@ class CameraRepositoryImpl
                 //   )
 
                 // Stub: return a deterministic placeholder session.
+                // TODO(M09): Replace with the real session id returned by fujiNativeSdk.openWifiSession.
                 val stubSessionId = SessionId(0L)
                 _sessionState.value = CameraSessionState.SessionReady(stubSessionId)
 
-                // Start the foreground service now that the session is ready.
-                // CameraSessionController (inside CameraSessionService) drives stopSelf()
-                // when the state reaches Closed or Failed — the repository does not call
-                // stopService directly. See G4 in CLAUDE.md and docs/adr/0001.
-                val intent =
-                    Intent(context, CameraSessionService::class.java).apply {
-                        putExtra(CameraSessionService.EXTRA_SESSION_ID, stubSessionId.value)
-                    }
-                context.startForegroundService(intent)
+                // Start the foreground service only when a real session id is available.
+                // SessionId(0L) is a stub placeholder; native_close_session(0) returns
+                // ERR_INVALID_SESSION, confirming 0 is not a valid handle. Once M09 wires
+                // the real fd-handoff path, stubSessionId.value will be a non-zero Rust
+                // session handle and the condition below will pass.
+                // TODO(audit): remove the stub guard and always start FGS here once M09
+                //   replaces SessionId(0L) with the real session id from openWifiSession.
+                if (stubSessionId.value != 0L) {
+                    val intent =
+                        Intent(context, CameraSessionService::class.java).apply {
+                            putExtra(CameraSessionService.EXTRA_SESSION_ID, stubSessionId.value)
+                        }
+                    context.startForegroundService(intent)
+                }
 
                 Result.success(stubSessionId)
             }
