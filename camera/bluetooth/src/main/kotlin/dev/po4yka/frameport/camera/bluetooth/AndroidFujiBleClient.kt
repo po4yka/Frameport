@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
@@ -22,11 +23,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import timber.log.Timber
 import java.util.concurrent.atomic.AtomicBoolean
@@ -116,8 +118,18 @@ class AndroidFujiBleClient
         // FujiBleClient — public API
         // -------------------------------------------------------------------------
 
-        // cancel-safe: delegates to BleScanner.scan() which is a cold flow.
-        override fun scan(): Flow<BleCameraAdvertisement> = bleScanner.scan()
+        // cancel-safe: delegates to BleScanner.scan() which is a cold flow; onStart and
+        // onCompletion execute synchronously on the collector's coroutine, not concurrently.
+        override fun scan(): Flow<BleCameraAdvertisement> =
+            bleScanner
+                .scan()
+                .onStart { _connectionState.value = BleConnectionState.Scanning }
+                .onCompletion {
+                    _connectionState.compareAndSet(
+                        BleConnectionState.Scanning,
+                        BleConnectionState.Disconnected,
+                    )
+                }
 
         /**
          * Enqueue a connect operation for [camera] and await the result.
@@ -180,6 +192,11 @@ class AndroidFujiBleClient
          * Privacy: characteristic UUID logged at debug level; payload is NEVER logged.
          */
         override suspend fun read(characteristic: CharacteristicId): Result<ByteArray> {
+            if (_connectionState.value == BleConnectionState.Failed) {
+                return Result.failure(
+                    BleOperationCancelled("BLE client is in terminal Failed state — read rejected"),
+                )
+            }
             val deferred = kotlinx.coroutines.CompletableDeferred<ByteArray>()
             return try {
                 enqueueOperation(GattOperation.Read(characteristic, deferred))
@@ -203,6 +220,11 @@ class AndroidFujiBleClient
             characteristic: CharacteristicId,
             payload: ByteArray,
         ): Result<Unit> {
+            if (_connectionState.value == BleConnectionState.Failed) {
+                return Result.failure(
+                    BleOperationCancelled("BLE client is in terminal Failed state — write rejected"),
+                )
+            }
             val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
             return try {
                 enqueueOperation(GattOperation.Write(characteristic, payload, deferred))
@@ -309,8 +331,13 @@ class AndroidFujiBleClient
         }
 
         private suspend fun processConnect(op: GattOperation.Connect) {
+            var lastFailure: Throwable = BleTransportException.GattConnectionFailed()
+            // Loop runs exactly RECONNECT_MAX_ATTEMPTS times (attempt index 0..MAX-1).
+            // On each failure attempt is incremented; when it reaches MAX the loop exits and
+            // the terminal failure path below fires. Using < avoids the off-by-one that
+            // <= produced (MAX+1 total tries instead of MAX).
             var attempt = 0
-            while (attempt <= BleConstants.RECONNECT_MAX_ATTEMPTS) {
+            while (attempt < BleConstants.RECONNECT_MAX_ATTEMPTS) {
                 try {
                     withTimeout(BleConstants.GATT_CONNECT_TIMEOUT_MS) {
                         gattTransport.connect(op.camera)
@@ -322,36 +349,22 @@ class AndroidFujiBleClient
                     op.deferred.complete(Unit)
                     return
                 } catch (e: TimeoutCancellationException) {
+                    lastFailure = BleTransportException.GattConnectionFailed(e)
                     attempt++
-                    val failure = BleTransportException.GattConnectionFailed(e)
-                    if (attempt > BleConstants.RECONNECT_MAX_ATTEMPTS) {
-                        Timber.e("BLE: connect failed after $attempt attempts")
-                        _connectionState.value = BleConnectionState.Failed
-                        op.deferred.completeExceptionally(failure)
-                        cancelPendingOperations()
-                        return
-                    }
                     val backoffMs =
                         min(
                             BleConstants.RECONNECT_BASE_DELAY_MS * (1L shl (attempt - 1)),
                             MAX_RECONNECT_DELAY_MS,
                         )
-                    Timber.d("BLE: connect attempt $attempt failed, retrying in ${backoffMs}ms")
+                    Timber.d("BLE: connect attempt $attempt failed (timeout), retrying in ${backoffMs}ms")
                     delay(backoffMs)
                 } catch (e: CancellationException) {
                     // Caller cancelled or actor is shutting down — propagate, don't retry.
                     op.deferred.completeExceptionally(BleOperationCancelled("Connect cancelled"))
                     throw e
                 } catch (e: Exception) {
+                    lastFailure = e.asBleConnectFailure()
                     attempt++
-                    val failure = e.asBleConnectFailure()
-                    if (attempt > BleConstants.RECONNECT_MAX_ATTEMPTS) {
-                        Timber.e("BLE: connect failed after $attempt attempts")
-                        _connectionState.value = BleConnectionState.Failed
-                        op.deferred.completeExceptionally(failure)
-                        cancelPendingOperations()
-                        return
-                    }
                     val backoffMs =
                         min(
                             BleConstants.RECONNECT_BASE_DELAY_MS * (1L shl (attempt - 1)),
@@ -361,6 +374,11 @@ class AndroidFujiBleClient
                     delay(backoffMs)
                 }
             }
+            // All RECONNECT_MAX_ATTEMPTS exhausted — transition to terminal Failed state.
+            Timber.e("BLE: connect failed after $attempt attempts")
+            _connectionState.value = BleConnectionState.Failed
+            op.deferred.completeExceptionally(lastFailure)
+            cancelPendingOperations()
         }
 
         private suspend fun processRead(op: GattOperation.Read) {
@@ -513,11 +531,15 @@ private fun Throwable.asCharacteristicFailure(
     operation: BleTransportException.Operation,
 ): Throwable =
     when (this) {
-        is BleTransportException -> this
-        else ->
+        is BleTransportException -> {
+            this
+        }
+
+        else -> {
             BleTransportException.CharacteristicOperationFailed(
                 characteristicId = characteristicId,
                 operation = operation,
                 cause = this,
             )
+        }
     }

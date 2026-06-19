@@ -467,6 +467,141 @@ class FujiBleClientTest {
      * [startActor] ran only in `init`, so every reconnect attempt enqueued on a dead channel
      * and failed for the process lifetime.
      */
+    // =========================================================================
+    // Scanning state emission test
+    // =========================================================================
+
+    /**
+     * Verifies that collecting scan() transitions connectionState to Scanning and back
+     * to Disconnected after the scan flow completes — fixing the Disconnected->Connecting
+     * gap in the documented state contract.
+     */
+    @Test
+    fun scanEmitsScanningStateWhileFlowIsActive() =
+        testScope.runTest {
+            // Initially Disconnected.
+            assertEquals(BleConnectionState.Disconnected, client.connectionState.value)
+
+            val states = mutableListOf<BleConnectionState>()
+            val collectJob =
+                launch {
+                    client.connectionState.collect { states.add(it) }
+                }
+
+            // Collect one element from scan() then cancel — this should emit Scanning then
+            // revert to Disconnected via onCompletion.
+            val scanJob =
+                launch {
+                    client.scan().collect { /* consume one item then let job be cancelled */ }
+                }
+
+            // Emit a camera advertisement so scan() has something to emit.
+            fakeBleScanner.emitDefaultCamera()
+            advanceUntilIdle()
+
+            // Cancel the scan collection — onCompletion should restore Disconnected.
+            scanJob.cancel()
+            advanceUntilIdle()
+            collectJob.cancel()
+
+            assertTrue(
+                "Scanning state must be observed while scan() is active",
+                states.contains(BleConnectionState.Scanning),
+            )
+        }
+
+    // =========================================================================
+    // Failed state guard for read() and write()
+    // =========================================================================
+
+    /**
+     * Verifies that read() returns a typed failure immediately when the client is in
+     * the terminal Failed state, mirroring connect()'s Failed guard.
+     */
+    @Test
+    fun readInFailedStateReturnsImmediateFailure() =
+        testScope.runTest {
+            // Drive client to Failed by exhausting all connect retries.
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.connectError = IllegalStateException("always fail")
+            client.connect(camera)
+            advanceUntilIdle()
+
+            assertEquals(
+                "Precondition: state must be Failed",
+                BleConnectionState.Failed,
+                client.connectionState.value,
+            )
+
+            // Now attempt a read — must fail immediately with BleOperationCancelled.
+            val result = client.read(CharacteristicId(BleConstants.CHR_CAMERA_VITAL_STATE))
+            advanceUntilIdle()
+
+            assertTrue("read() in Failed state must return failure", result.isFailure)
+            assertTrue(
+                "read() failure in Failed state must be BleOperationCancelled",
+                result.exceptionOrNull() is BleOperationCancelled,
+            )
+        }
+
+    /**
+     * Verifies that write() returns a typed failure immediately when the client is in
+     * the terminal Failed state, mirroring connect()'s Failed guard.
+     */
+    @Test
+    fun writeInFailedStateReturnsImmediateFailure() =
+        testScope.runTest {
+            // Drive client to Failed by exhausting all connect retries.
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.connectError = IllegalStateException("always fail")
+            client.connect(camera)
+            advanceUntilIdle()
+
+            assertEquals(
+                "Precondition: state must be Failed",
+                BleConnectionState.Failed,
+                client.connectionState.value,
+            )
+
+            // Now attempt a write — must fail immediately with BleOperationCancelled.
+            val result = client.write(CharacteristicId(BleConstants.CHR_PAIRING_KEY), byteArrayOf(0x01))
+            advanceUntilIdle()
+
+            assertTrue("write() in Failed state must return failure", result.isFailure)
+            assertTrue(
+                "write() failure in Failed state must be BleOperationCancelled",
+                result.exceptionOrNull() is BleOperationCancelled,
+            )
+        }
+
+    // =========================================================================
+    // Reconnect loop count test
+    // =========================================================================
+
+    /**
+     * Verifies that the connect retry loop runs exactly [BleConstants.RECONNECT_MAX_ATTEMPTS]
+     * times (not RECONNECT_MAX_ATTEMPTS+1) before transitioning to Failed.
+     *
+     * Before the off-by-one fix (attempt <= MAX vs attempt < MAX), the loop ran one extra
+     * iteration, making the actual retry count exceed the documented constant.
+     */
+    @Test
+    fun connectRetriesExactlyReconnectMaxAttemptsBeforeFailing() =
+        testScope.runTest {
+            val camera = BleCameraRef(id = "11:22:33:44:55:66", displayName = "X-T5")
+            fakeGattTransport.connectError = IllegalStateException("always fail")
+
+            client.connect(camera)
+            advanceUntilIdle()
+
+            assertEquals(
+                "Transport connect must be called exactly RECONNECT_MAX_ATTEMPTS times",
+                BleConstants.RECONNECT_MAX_ATTEMPTS,
+                fakeGattTransport.connectCallCount,
+            )
+            assertEquals(BleConnectionState.Failed, client.connectionState.value)
+        }
+
     @Test
     fun reconnectAfterDisconnectSucceeds() =
         testScope.runTest {
