@@ -9,3 +9,6 @@ publish.workspace = true
 fuji-core.workspace = true
 fuji-ptp.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "io-util", "time", "macros", "sync"] }
+# libc is used only in the #[cfg(debug_assertions)] SO_TYPE validity check inside
+# event::EventChannelReader::from_raw_fd. Zero runtime cost in release builds.
+libc.workspace = true

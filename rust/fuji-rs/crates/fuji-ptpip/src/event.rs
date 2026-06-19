@@ -45,6 +45,9 @@ use std::os::unix::io::FromRawFd;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[cfg(debug_assertions)]
+use libc;
+
 use fuji_core::{FujiError, FujiResult, TransportError};
 use fuji_ptp::constants::event_code;
 use fuji_ptp::{PtpIpPacket, decode_packet, encode_packet};
@@ -169,15 +172,67 @@ impl EventChannelReader {
     ///
     // cancel-safe: synchronous conversion, no .await points.
     //
-    // SAFETY: `fd` must be a valid, open file descriptor that refers to a TCP
-    // socket. The caller (Android JNI layer) must have already duplicated the
-    // original fd (via dup(2)) so that Rust holds exclusive ownership. After
-    // this call the caller MUST NOT close or use the original fd — Rust's Drop
-    // impl for TcpStream will close it. Violating this invariant causes a
-    // double-close (use-after-free at the OS level).
+    // SAFETY requirements that the Kotlin caller MUST guarantee before this call:
+    //
+    // 1. `fd` is a valid, open file descriptor in the calling process — i.e. it
+    //    has not been closed and was not returned as an error from any syscall.
+    //
+    // 2. `fd` refers specifically to a TCP stream socket (AF_INET or AF_INET6,
+    //    SOCK_STREAM, IPPROTO_TCP). Passing a UDP socket, a pipe, a file, or any
+    //    other fd type is undefined behaviour because `TcpStream` methods will
+    //    issue socket-specific syscalls (e.g. TCP_NODELAY, getsockopt) that
+    //    produce UB or silent misbehaviour on non-TCP fds.
+    //
+    // 3. The socket is in the ESTABLISHED state — i.e. the three-way TCP handshake
+    //    has completed and the connection is live. Passing a listening socket or a
+    //    socket that is still connecting is unsound.
+    //
+    // 4. The fd was duplicated on the Kotlin side via `dup(2)` (or equivalently
+    //    via `ParcelFileDescriptor.fromSocket(socket).detachFd()`) BEFORE being
+    //    passed to Rust. Rust assumes exclusive ownership: after this call the
+    //    Kotlin side MUST NOT use or close the original fd. The Rust `Drop` impl
+    //    for `TcpStream` will call `close(2)` on the fd when the reader is dropped.
+    //    Closing the same fd twice (double-close) is UB at the OS level and may
+    //    close an unrelated fd that was opened between the two closes.
+    //
+    // 5. No other Rust object holds or will hold an alias to this fd number.
+    //
+    // Violation of any of the above invariants constitutes UB. Callers should
+    // verify preconditions in the JNI boundary before calling this function.
     pub fn from_raw_fd(fd: i32) -> FujiResult<Self> {
-        // SAFETY: We require the caller to pass an owned, valid TCP-socket fd.
-        // See the SAFETY block above and the module-level fd-ownership contract.
+        // Debug-only validation: check that `fd` is actually a TCP socket by
+        // inspecting SO_TYPE via getsockopt. This catches the most common mistake
+        // (passing a non-socket fd) at the earliest possible moment in debug builds.
+        // In release builds this block compiles away entirely (zero overhead).
+        #[cfg(debug_assertions)]
+        {
+            // SAFETY: getsockopt is a read-only syscall. We pass valid stack
+            // addresses for optval and optlen. The fd is not yet owned by any
+            // Rust object, so there is no aliasing. If getsockopt fails (fd
+            // invalid or not a socket), we return an error before from_raw_fd,
+            // which is exactly what we want — the fd remains unowned by Rust.
+            let mut sock_type: libc::c_int = 0;
+            let mut optlen: libc::socklen_t =
+                core::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            let rc = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    core::ptr::addr_of_mut!(sock_type).cast(),
+                    core::ptr::addr_of_mut!(optlen),
+                )
+            };
+            if rc != 0 || sock_type != libc::SOCK_STREAM {
+                // fd is not a valid stream socket — reject before taking ownership.
+                return Err(FujiError::Transport(TransportError::ReadFailed));
+            }
+        }
+
+        // SAFETY: All invariants listed in the SAFETY block above must be upheld
+        // by the Kotlin caller. In debug builds the getsockopt check above has
+        // already verified that `fd` is a SOCK_STREAM fd. In release builds the
+        // caller contract is the only guarantee.
         let std_stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
         std_stream
             .set_nonblocking(true)
