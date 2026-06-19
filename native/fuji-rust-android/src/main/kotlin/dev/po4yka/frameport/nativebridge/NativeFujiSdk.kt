@@ -22,7 +22,9 @@ fun interface LiveViewFrameCallback {
 interface NativeFujiSdk {
     val diagnosticState: NativeFujiDiagnosticState
 
-    fun version(): String
+    // Returns null when the native library returns a null version string on error.
+    // Callers must substitute a sentinel (e.g. "unknown") rather than force-unwrapping.
+    fun version(): String?
 
     fun initialize(): Result<Unit>
 

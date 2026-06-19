@@ -9,8 +9,10 @@ class NativeFujiJni private constructor() {
         const val ERR_INVALID_SESSION: Int = -2
         const val ERR_PANIC: Int = -100
 
+        // Returns null on error (Rust side may return a null jstring on failure);
+        // callers must handle null and fall back to a sentinel such as "unknown".
         @JvmStatic
-        external fun nativeVersion(): String
+        external fun nativeVersion(): String?
 
         @JvmStatic
         external fun nativeInitialize(): Int

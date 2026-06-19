@@ -21,7 +21,7 @@ class JniNativeFujiSdk(
                 )
             }
 
-    override fun version(): String =
+    override fun version(): String? =
         callOrFallback(
             nativeCall = NativeFujiJni::nativeVersion,
             fallbackCall = fallback::version,

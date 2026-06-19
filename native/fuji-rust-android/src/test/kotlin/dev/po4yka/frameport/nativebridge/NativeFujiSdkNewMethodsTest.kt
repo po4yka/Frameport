@@ -321,7 +321,7 @@ private class FakeNativeFujiSdk : NativeFujiSdk {
     private var nextSessionId: Long = 1L
     private val activeSessions: MutableSet<Long> = mutableSetOf()
 
-    override fun version(): String = "0.0.0-fake"
+    override fun version(): String? = "0.0.0-fake"
 
     override fun initialize(): Result<Unit> = Result.success(Unit)
 

@@ -7,7 +7,7 @@ class NoOpNativeFujiSdk(
             message = "Native Fuji SDK is running in no-op mode.",
         ),
 ) : NativeFujiSdk {
-    override fun version(): String = "0.1.0-noop"
+    override fun version(): String? = "0.1.0-noop"
 
     override fun initialize(): Result<Unit> = Result.success(Unit)
 
