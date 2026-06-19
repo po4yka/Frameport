@@ -44,6 +44,7 @@ object AllowlistRemoteCapabilityChecker : RemoteCapabilityChecker {
 
     override fun isRemoteCapable(cameraModel: String?): Boolean {
         if (cameraModel.isNullOrBlank()) return false
-        return REMOTE_CAPABLE_MODELS.contains(cameraModel.trim())
+        val trimmed = cameraModel.trim()
+        return REMOTE_CAPABLE_MODELS.any { it.equals(trimmed, ignoreCase = true) }
     }
 }
