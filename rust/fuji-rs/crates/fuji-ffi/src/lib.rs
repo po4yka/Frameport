@@ -54,8 +54,18 @@ struct LiveViewHandle {
 /// Access serialised by Mutex; the worker thread is separate (std::thread).
 static LIVEVIEW_SESSIONS: Mutex<BTreeMap<i64, LiveViewHandle>> = Mutex::new(BTreeMap::new());
 
-/// Cached JavaVM handle for attach_current_thread_as_daemon in worker threads.
-/// Set once in nativeLiveViewStart (or JNI_OnLoad when wired). JavaVM is Send + Sync.
+/// Cached JavaVM handle used to attach the live-view worker thread via
+/// `attach_current_thread_for_scope`. Set once in JNI_OnLoad and lazily in
+/// nativeLiveViewStart. JavaVM is Send + Sync.
+///
+/// jni 0.22.4 does not expose an `attach_current_thread_as_daemon` API — daemon
+/// attachment is explicitly out of scope (see jni 0.22.4 `JavaVM::destroy` doc).
+/// Instead we use `attach_current_thread_for_scope`, which attaches the thread
+/// and guarantees detachment when the callback returns, regardless of how the
+/// closure exits (normal return, early return on error, or panic caught by the
+/// surrounding `catch_unwind`). This is equivalent in practice: the worker is a
+/// short-lived std::thread that exits after the liveview loop terminates, and
+/// `native_shutdown` joins every worker before JVM unload proceeds.
 static JAVA_VM: Mutex<Option<JavaVM>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
@@ -105,34 +115,65 @@ pub fn native_shutdown() -> i32 {
     };
     // Signal all live-view workers to stop; join them so the JVM can safely
     // unload. Entries are removed from the registry as we drain them.
-    let liveview_ok = match LIVEVIEW_SESSIONS.lock() {
-        Ok(mut lv) => {
-            for handle in lv.values() {
-                // Relaxed is correct here: the stop_flag carries no data payload;
-                // it is a pure termination signal. The preceding Mutex::lock()
-                // provides a full memory fence that makes all prior writes visible
-                // to any thread that subsequently acquires the same mutex. The
-                // following jh.join() provides an implicit acquire barrier that
-                // ensures any stores made before join() are visible afterward.
-                // The reader (run_liveview_loop) uses Relaxed load and only needs
-                // eventual visibility — a few extra iterations before observing
-                // the flag on a weakly-ordered CPU are acceptable.
-                handle.stop_flag.store(true, Ordering::Relaxed);
-                wake_liveview_reader(&handle.wake_fd);
-            }
-            // Collect keys first to avoid holding the guard while joining.
-            let keys: Vec<i64> = lv.keys().copied().collect();
-            for key in keys {
-                if let Some(mut handle) = lv.remove(&key)
-                    && let Some(jh) = handle.worker.take()
-                {
+    //
+    // DEADLOCK PREVENTION: We must NOT hold the LIVEVIEW_SESSIONS mutex while
+    // calling jh.join(). Any concurrent JNI call (nativeLiveViewStop,
+    // nativeLiveViewStart) that tries to lock LIVEVIEW_SESSIONS would deadlock
+    // against the join, which cannot complete until the worker exits — and the
+    // worker may be blocked waiting for that same concurrent call to proceed.
+    //
+    // Correct pattern (mirrors stop_liveview_worker):
+    //   1. Lock, signal all stop_flags + wake all workers, drain ALL handles
+    //      (JoinHandles + wake_fds) into a local Vec.
+    //   2. DROP the lock guard.
+    //   3. Join every worker outside the lock.
+    let liveview_ok = {
+        // Phase 1: signal + drain while holding the lock.
+        let drained: Option<Vec<LiveViewHandle>> = match LIVEVIEW_SESSIONS.lock() {
+            Ok(mut lv) => {
+                let mut handles = Vec::with_capacity(lv.len());
+                for handle in lv.values() {
+                    // Relaxed is correct here: the stop_flag carries no data
+                    // payload; it is a pure termination signal. The preceding
+                    // Mutex::lock() provides a full memory fence that makes all
+                    // prior writes visible to any thread that subsequently
+                    // acquires the same mutex. The following jh.join() (phase 2,
+                    // outside the lock) provides an implicit acquire barrier that
+                    // ensures any stores made before join() are visible afterward.
+                    // The reader (run_liveview_loop) uses Relaxed load and only
+                    // needs eventual visibility — a few extra iterations before
+                    // observing the flag on a weakly-ordered CPU are acceptable.
+                    handle.stop_flag.store(true, Ordering::Relaxed);
                     wake_liveview_reader(&handle.wake_fd);
-                    let _ = jh.join();
                 }
+                // Drain all entries (handles own JoinHandle + wake_fd) into a
+                // local Vec so we hold nothing across the join below.
+                // A second wake per entry is intentional: signal → drain → drop
+                // lock → join is the canonical pattern; the worker may not have
+                // observed the stop_flag yet when we call wake again here.
+                let keys: Vec<i64> = lv.keys().copied().collect();
+                for key in keys {
+                    if let Some(handle) = lv.remove(&key) {
+                        wake_liveview_reader(&handle.wake_fd);
+                        handles.push(handle);
+                    }
+                }
+                Some(handles)
             }
-            true
+            Err(_) => None,
+        };
+        // Phase 2: join all workers AFTER the lock is released.
+        match drained {
+            Some(mut handles) => {
+                for handle in &mut handles {
+                    if let Some(jh) = handle.worker.take() {
+                        let _ = jh.join();
+                    }
+                }
+                true
+            }
+            None => false,
         }
-        Err(_) => false,
     };
     if sessions_ok && wifi_ok && usb_ok && transfers_ok && liveview_ok {
         OK
@@ -725,7 +766,9 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
 /// # JNI / thread safety
 /// `callback_obj` is registered as a global reference before spawning the worker
 /// thread. The `Env` from this call is NOT captured — a fresh `Env` is
-/// obtained inside the worker via `JavaVM::attach_current_thread_as_daemon`.
+/// obtained inside the worker via `JavaVM::attach_current_thread_for_scope`
+/// (jni 0.22.4; there is no `attach_current_thread_as_daemon` in this version).
+/// The thread is detached automatically when the callback returns.
 /// The `JavaVM` is cached in `JAVA_VM` for subsequent calls.
 ///
 /// Returns `OK` (0) on success or a negative ERR_* sentinel on failure.
@@ -801,8 +844,14 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                     Ok(vm) => vm,
                     Err(_) => return ERR_PANIC,
                 };
+                // Populate the cache only if JNI_OnLoad did not already (lazy fallback).
+                // Avoids a redundant write on the common path; JavaVM is process-stable.
                 match JAVA_VM.lock() {
-                    Ok(mut guard) => *guard = Some(vm),
+                    Ok(mut guard) => {
+                        if guard.is_none() {
+                            *guard = Some(vm);
+                        }
+                    }
                     Err(_) => return ERR_PANIC,
                 }
 
@@ -847,21 +896,10 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                             // ── Obtain the cached JavaVM ───────────────────────────────────
                             let vm = match JAVA_VM.lock() {
                                 Ok(guard) => match guard.as_ref() {
-                                    Some(vm) => {
-                                        // SAFETY: JavaVM::clone is a pointer copy; the JVM
-                                        // process stays alive for the duration of this thread.
-                                        // SAFETY: We need a JavaVM to attach. The pointer in
-                                        // the global Mutex is valid for the process lifetime.
-                                        //
-                                        // jni 0.21 JavaVM does not implement Clone directly;
-                                        // we rebuild from the raw pointer.
-                                        let raw = vm.get_raw();
-                                        // SAFETY: raw is a valid JavaVM pointer obtained from
-                                        // the cached process-wide JavaVM. JavaVM::from_raw
-                                        // copies the pointer; the JVM owns the lifetime and
-                                        // outlives this worker thread.
-                                        unsafe { JavaVM::from_raw(raw) }
-                                    }
+                                    // JavaVM is Clone in jni 0.22.4 (a pointer copy); the JVM
+                                    // process outlives this worker thread, so the cloned handle
+                                    // is valid for the scoped attach below. No unsafe needed.
+                                    Some(vm) => vm.clone(),
                                     None => {
                                         // Close the fd we took ownership of before returning.
                                         close_raw_fd_if_unconsumed(
@@ -877,94 +915,147 @@ pub extern "system" fn Java_dev_po4yka_frameport_nativebridge_NativeFujiJni_nati
                                 }
                             };
 
-                            let attach_result: jni::errors::Result<()> =
-                                vm.attach_current_thread(|jni_env| -> jni::errors::Result<()> {
-                                    // ── Build TcpStream from the raw fd ───────────────────────────
-                                    // SAFETY: raw_fd is the result of OwnedFd::into_raw_fd() on a
-                                    // valid, dup'd socket fd. We take exclusive ownership here;
-                                    // Android owns and will close the original. The TcpStream will
-                                    // close raw_fd when dropped (end of this thread's scope).
-                                    let std_stream =
-                                        unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
-                                    raw_fd_consumed_for_body.store(true, Ordering::SeqCst);
-                                    // Convert to a non-blocking tokio TcpStream inside the runtime.
+                            // attach_current_thread_for_scope attaches the thread
+                            // for the duration of the callback and guarantees
+                            // detachment when the callback returns (normal exit,
+                            // early return, or panic caught by the outer
+                            // catch_unwind). This is the correct scoped-attach
+                            // API in jni 0.22.4; there is no
+                            // `attach_current_thread_as_daemon` in this version.
+                            // The worker is joined by native_shutdown before JVM
+                            // unload, so the absence of daemon semantics is safe.
+                            let attach_result: jni::errors::Result<()> = vm
+                                .attach_current_thread_for_scope(
+                                    |jni_env| -> jni::errors::Result<()> {
+                                        // ── Build TcpStream from the raw fd ───────────────────────────
+                                        // SAFETY: raw_fd is the result of OwnedFd::into_raw_fd() on a
+                                        // valid, dup'd socket fd. We take exclusive ownership here;
+                                        // Android owns and will close the original. The TcpStream will
+                                        // close raw_fd when dropped (end of this thread's scope).
+                                        let std_stream =
+                                            unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
+                                        raw_fd_consumed_for_body.store(true, Ordering::SeqCst);
+                                        // Convert to a non-blocking tokio TcpStream inside the runtime.
 
-                                    // ── Run a current-thread tokio runtime ────────────────────────
-                                    let rt = match tokio::runtime::Builder::new_current_thread()
-                                        .enable_io()
-                                        .build()
-                                    {
-                                        Ok(rt) => rt,
-                                        Err(_) => {
-                                            // std_stream will close raw_fd on drop.
-                                            return Ok(());
-                                        }
-                                    };
-
-                                    rt.block_on(async move {
-                                        // Convert std TcpStream to tokio TcpStream (requires non-blocking).
-                                        let _ = std_stream.set_nonblocking(true);
-                                        let mut stream =
-                                            match tokio::net::TcpStream::from_std(std_stream) {
-                                                Ok(s) => s,
-                                                Err(_) => return,
-                                            };
-
-                                        let session = match fuji_core::SessionId::new(session_id) {
-                                            Ok(s) => s,
-                                            Err(_) => return,
+                                        // ── Run a current-thread tokio runtime ────────────────────────
+                                        let rt = match tokio::runtime::Builder::new_current_thread()
+                                            .enable_io()
+                                            .build()
+                                        {
+                                            Ok(rt) => rt,
+                                            Err(_) => {
+                                                // std_stream will close raw_fd on drop.
+                                                return Ok(());
+                                            }
                                         };
-                                        let mut parser = LiveViewParser::new(session);
-                                        let runtime_signature =
-                                            match RuntimeMethodSignature::from_str("([B)V") {
-                                                Ok(signature) => signature,
-                                                Err(_) => return,
-                                            };
 
-                                        // on_frame: called synchronously for each parsed JPEG frame.
-                                        // Allocates a JVM byte[] (unavoidable JNI marshaling cost;
-                                        // excluded from the Rust zero-alloc constraint per spec).
-                                        // The explicit local frame prevents per-frame byte[] local
-                                        // references from accumulating on Android's small JNI local
-                                        // reference table during sustained live view.
-                                        // No logging on the hot path per privacy-local-first.md and
-                                        // the per-frame-no-log constraint.
-                                        let on_frame = |jpeg: &[u8]| {
-                                            let _: jni::errors::Result<()> = jni_env
-                                                .with_local_frame(16, |env| {
-                                                    // Allocate JVM byte[] from the JPEG slice.
-                                                    let byte_arr =
-                                                        env.byte_array_from_slice(jpeg)?;
-                                                    let signature =
-                                                        MethodSignature::from(&runtime_signature);
-                                                    // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
-                                                    let _ = env.call_method(
-                                                        callback_global.as_obj(),
-                                                        JNIString::from("onLiveViewFrame"),
-                                                        signature,
-                                                        &[JValue::Object(&byte_arr)],
-                                                    );
-                                                    // Clear any pending exception so the next frame can proceed.
-                                                    if env.exception_check() {
-                                                        env.exception_clear();
+                                        rt.block_on(async move {
+                                            // Convert std TcpStream to tokio TcpStream (requires non-blocking).
+                                            let _ = std_stream.set_nonblocking(true);
+                                            let mut stream =
+                                                match tokio::net::TcpStream::from_std(std_stream) {
+                                                    Ok(s) => s,
+                                                    Err(_) => return,
+                                                };
+
+                                            let session =
+                                                match fuji_core::SessionId::new(session_id) {
+                                                    Ok(s) => s,
+                                                    Err(_) => return,
+                                                };
+                                            let mut parser = LiveViewParser::new(session);
+                                            let runtime_signature =
+                                                match RuntimeMethodSignature::from_str("([B)V") {
+                                                    Ok(signature) => signature,
+                                                    Err(_) => return,
+                                                };
+
+                                            // on_frame: called synchronously for each parsed JPEG frame.
+                                            // Allocates a JVM byte[] (unavoidable JNI marshaling cost;
+                                            // excluded from the Rust zero-alloc constraint per spec).
+                                            // The explicit local frame prevents per-frame byte[] local
+                                            // references from accumulating on Android's small JNI local
+                                            // reference table during sustained live view.
+                                            // No logging on the hot path per privacy-local-first.md and
+                                            // the per-frame-no-log constraint.
+                                            //
+                                            // Consecutive-exception guard: if the JVM callback raises
+                                            // an uncleared exception (OOM, NPE, …) on CALLBACK_ERR_LIMIT
+                                            // frames in a row, the loop is treated as unrecoverable and
+                                            // stop_flag_worker is set so run_liveview_loop exits cleanly.
+                                            // The counter resets to 0 on any successful callback. Raw
+                                            // device identifiers are never logged (privacy-local-first.md).
+                                            const CALLBACK_ERR_LIMIT: u32 = 3;
+                                            let mut consecutive_callback_errors: u32 = 0;
+                                            let on_frame = |jpeg: &[u8]| {
+                                                let result: jni::errors::Result<()> = jni_env
+                                                    .with_local_frame(16, |env| {
+                                                        // Allocate JVM byte[] from the JPEG slice.
+                                                        let byte_arr =
+                                                            env.byte_array_from_slice(jpeg)?;
+                                                        let signature = MethodSignature::from(
+                                                            &runtime_signature,
+                                                        );
+                                                        // Call callback.onLiveViewFrame([B)V on the callback GlobalRef.
+                                                        let _ = env.call_method(
+                                                            callback_global.as_obj(),
+                                                            JNIString::from("onLiveViewFrame"),
+                                                            signature,
+                                                            &[JValue::Object(&byte_arr)],
+                                                        );
+                                                        // Detect a persistent JVM exception from the callback.
+                                                        // Do NOT silently clear unconditionally — capture
+                                                        // the error state first so the consecutive-error
+                                                        // counter can be updated below.
+                                                        let had_exception = env.exception_check();
+                                                        if had_exception {
+                                                            env.exception_clear();
+                                                        }
+                                                        if had_exception {
+                                                            Err(jni::errors::Error::JavaException)
+                                                        } else {
+                                                            Ok(())
+                                                        }
+                                                    });
+                                                match result {
+                                                    Ok(()) => {
+                                                        // Successful delivery — reset the error streak.
+                                                        consecutive_callback_errors = 0;
                                                     }
-                                                    Ok(())
-                                                });
-                                        };
+                                                    Err(_) => {
+                                                        consecutive_callback_errors =
+                                                            consecutive_callback_errors
+                                                                .saturating_add(1);
+                                                        if consecutive_callback_errors
+                                                            >= CALLBACK_ERR_LIMIT
+                                                        {
+                                                            // Persistent callback failure (e.g. OOM, NPE).
+                                                            // Signal the loop to exit so we do not spin
+                                                            // forever delivering frames the JVM cannot
+                                                            // accept. stop_flag_worker uses Relaxed: the
+                                                            // run_liveview_loop checks it on each frame
+                                                            // boundary with eventual-visibility semantics.
+                                                            stop_flag_worker
+                                                                .store(true, Ordering::Relaxed);
+                                                        }
+                                                    }
+                                                }
+                                            };
 
-                                        // run_liveview_loop is cancel-safe (see fuji-liveview doc).
-                                        let _ = run_liveview_loop(
-                                            &mut parser,
-                                            &mut stream,
-                                            on_frame,
-                                            &stop_flag_worker,
-                                        )
-                                        .await;
-                                        // GlobalRef (callback_global) is dropped here -> JVM reference released.
-                                    });
+                                            // run_liveview_loop is cancel-safe (see fuji-liveview doc).
+                                            let _ = run_liveview_loop(
+                                                &mut parser,
+                                                &mut stream,
+                                                on_frame,
+                                                &stop_flag_worker,
+                                            )
+                                            .await;
+                                            // GlobalRef (callback_global) is dropped here -> JVM reference released.
+                                        });
 
-                                    Ok(())
-                                });
+                                        Ok(())
+                                    },
+                                );
                             if attach_result.is_err() {
                                 // attach failed before TcpStream::from_raw_fd took ownership.
                                 close_raw_fd_if_unconsumed(raw_fd, &raw_fd_consumed_for_body);
@@ -1252,6 +1343,12 @@ mod tests {
     // Helper: reset all global state. Call while holding TEST_MUTEX.
     fn reset() {
         INITIALIZED.store(false, Ordering::SeqCst);
+        // Reset the session-id counter so tests that inspect returned ids get
+        // deterministic values regardless of execution order. Without this reset
+        // the counter accumulates across test runs in the same process, making
+        // assertions like `assert!(id > 0)` non-deterministic when tests check
+        // specific id ranges.
+        NEXT_SESSION_ID.store(1, Ordering::SeqCst);
         SESSIONS.lock().unwrap().clear();
         WIFI_SESSIONS.lock().unwrap().clear();
         USB_SESSIONS.lock().unwrap().clear();
