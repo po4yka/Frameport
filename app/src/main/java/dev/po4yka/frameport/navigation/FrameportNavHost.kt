@@ -33,7 +33,9 @@ fun FrameportNavHost(
         },
         entryProvider = { key ->
             NavEntry(key) { destination ->
-                when (destination) {
+                // Cast to FrameportDestination so the when is exhaustive over the sealed hierarchy;
+                // the back-stack only ever contains FrameportDestination values.
+                when (destination as FrameportDestination) {
                     FrameportDestination.Onboarding -> {
                         OnboardingRoute(onContinue = { backStack.replaceWith(FrameportDestination.Home) })
                     }
@@ -87,10 +89,6 @@ fun FrameportNavHost(
 
                     FrameportDestination.LocalTimeline -> {
                         LocalTimelineRoute(onBack = { backStack.removeAt(backStack.lastIndex) })
-                    }
-
-                    else -> {
-                        HomeRoute(onNavigate = backStack::navigate)
                     }
                 }
             }
