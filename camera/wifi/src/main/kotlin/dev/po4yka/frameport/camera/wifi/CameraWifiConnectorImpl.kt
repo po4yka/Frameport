@@ -24,6 +24,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.net.InetSocketAddress
@@ -85,15 +87,26 @@ class CameraWifiConnectorImpl
             context.getSystemService(ConnectivityManager::class.java)
         }
 
-        // Guarded by the single-caller contract; replaced per requestCameraNetwork invocation.
-        @Volatile private var activeCallback: ConnectivityManager.NetworkCallback? = null
+        /**
+         * All mutable session state is grouped under a single [Mutex] so that mutations from
+         * the [ConnectivityManager.NetworkCallback] thread (onAvailable/onUnavailable/onLost)
+         * and from [release] (which runs on [ioDispatcher]) cannot interleave and produce torn
+         * reads (M-19). Every read/write of the fields below must be performed inside
+         * [sessionMutex.withLock].
+         */
+        private val sessionMutex = Mutex()
 
-        // Original socket kept alive to maintain the network binding until release().
-        @Volatile private var activeSocket: Socket? = null
+        /** Protected by [sessionMutex]. */
+        private var activeCallback: ConnectivityManager.NetworkCallback? = null
 
-        // Network delivered by onAvailable; set once per requestCameraNetwork and cleared on release.
-        // Used by findNetwork to avoid OEM-flaky allNetworks re-scanning.
-        @Volatile private var activeNetwork: Network? = null
+        /** Protected by [sessionMutex]. Original socket kept alive to maintain the network binding. */
+        private var activeSocket: Socket? = null
+
+        /**
+         * Protected by [sessionMutex]. Network delivered by onAvailable; cleared on release.
+         * Used by findNetwork to avoid OEM-flaky allNetworks re-scanning.
+         */
+        private var activeNetwork: Network? = null
 
         // Ensures release() is idempotent — second call is a no-op.
         private val released = AtomicBoolean(false)
@@ -170,7 +183,25 @@ class CameraWifiConnectorImpl
                         override fun onAvailable(network: Network) {
                             // Cache the exact Network object so findNetwork can return it directly
                             // without an OEM-flaky allNetworks re-scan.
-                            activeNetwork = network
+                            // Mutex.tryLock is used here because onAvailable runs on the
+                            // ConnectivityManager thread, which cannot suspend (M-19).
+                            val locked = sessionMutex.tryLock()
+                            if (locked) {
+                                try {
+                                    activeNetwork = network
+                                } finally {
+                                    sessionMutex.unlock()
+                                }
+                            } else {
+                                // Very unlikely: another coroutine holds the lock. The cache
+                                // remains stale; findNetwork falls back to allNetworks scan.
+                                Timber
+                                    .tag(
+                                        TAG,
+                                    ).d(
+                                        "requestCameraNetwork: onAvailable — mutex contended, network cache not updated",
+                                    )
+                            }
                             _state.value = CameraWifiState.NetworkAvailable
                             Timber.tag(TAG).d("requestCameraNetwork: NetworkAvailable")
                             // Use network id string as correlation key — never the SSID/MAC.
@@ -201,9 +232,9 @@ class CameraWifiConnectorImpl
 
                 // Unregister any stale callback from a previous requestCameraNetwork call
                 // before registering a new one; avoids a callback leak on repeated calls.
-                safeUnregisterCallback()
+                sessionMutex.withLock { safeUnregisterCallbackLocked() }
                 released.set(false)
-                activeCallback = networkCallback
+                sessionMutex.withLock { activeCallback = networkCallback }
                 var keepCallback = false
                 try {
                     connectivityManager.requestNetwork(request, networkCallback)
@@ -212,7 +243,7 @@ class CameraWifiConnectorImpl
                     result
                 } finally {
                     if (!keepCallback) {
-                        safeUnregisterCallback()
+                        sessionMutex.withLock { safeUnregisterCallbackLocked() }
                     }
                 }
             }
@@ -231,7 +262,7 @@ class CameraWifiConnectorImpl
                 if (network == null) {
                     val detail = "No active Network matching handle; network may have been lost"
                     _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
-                    safeUnregisterCallback()
+                    sessionMutex.withLock { safeUnregisterCallbackLocked() }
                     return@withContext Result.failure(IllegalStateException(detail))
                 }
 
@@ -245,7 +276,7 @@ class CameraWifiConnectorImpl
                     Timber.tag(TAG).d("openBoundSocket: SocketBindFailed (%s)", detail)
                     _state.value = CameraWifiState.Error(CameraWifiError.SocketBindFailed(detail))
                     socket.close()
-                    safeUnregisterCallback()
+                    sessionMutex.withLock { safeUnregisterCallbackLocked() }
                     return@withContext Result.failure(e)
                 }
 
@@ -262,7 +293,7 @@ class CameraWifiConnectorImpl
                     Timber.tag(TAG).d("openBoundSocket: SocketConnectFailed (%s)", detail)
                     _state.value = CameraWifiState.Error(CameraWifiError.SocketConnectFailed(detail))
                     socket.close()
-                    safeUnregisterCallback()
+                    sessionMutex.withLock { safeUnregisterCallbackLocked() }
                     return@withContext Result.failure(e)
                 }
 
@@ -287,12 +318,12 @@ class CameraWifiConnectorImpl
                         Timber.tag(TAG).d("openBoundSocket: UnexpectedError during fd handoff (%s)", detail)
                         _state.value = CameraWifiState.Error(CameraWifiError.UnexpectedError(e))
                         socket.close()
-                        safeUnregisterCallback()
+                        sessionMutex.withLock { safeUnregisterCallbackLocked() }
                         return@withContext Result.failure(e)
                     }
 
                 // Keep original socket alive — the Network binding is tied to it.
-                activeSocket = socket
+                sessionMutex.withLock { activeSocket = socket }
 
                 _state.value = CameraWifiState.Connected
                 Timber.tag(TAG).d("openBoundSocket: Connected")
@@ -490,14 +521,28 @@ class CameraWifiConnectorImpl
                 _state.value = CameraWifiState.Releasing
                 Timber.tag(TAG).d("release: Releasing")
 
-                safeUnregisterCallback()
+                // Capture and clear session state atomically under the mutex, then close
+                // resources outside the lock to avoid holding the mutex during blocking I/O.
+                val callbackToUnregister: ConnectivityManager.NetworkCallback?
+                val socketToClose: Socket?
+                sessionMutex.withLock {
+                    callbackToUnregister = activeCallback
+                    socketToClose = activeSocket
+                    activeCallback = null
+                    activeNetwork = null
+                    activeSocket = null
+                }
 
                 try {
-                    activeSocket?.close()
+                    callbackToUnregister?.let { connectivityManager.unregisterNetworkCallback(it) }
+                } catch (e: Exception) {
+                    Timber.tag(TAG).d("release: unregisterNetworkCallback: %s", e.javaClass.simpleName)
+                }
+
+                try {
+                    socketToClose?.close()
                 } catch (e: Exception) {
                     Timber.tag(TAG).d("release: socket close error: %s", e.javaClass.simpleName)
-                } finally {
-                    activeSocket = null
                 }
 
                 _state.value = CameraWifiState.Closed
@@ -505,14 +550,17 @@ class CameraWifiConnectorImpl
             }
 
         /**
-         * Unregisters the active network callback. Guaranteed to run on release() and on terminal Error.
+         * Unregisters the active network callback and clears session state.
+         * MUST be called with [sessionMutex] held. Performs no I/O (unregisterNetworkCallback is
+         * a lightweight binder call that does not block for meaningful time).
          * Safe to call multiple times — exceptions are swallowed and logged.
          */
-        private fun safeUnregisterCallback() {
+        private fun safeUnregisterCallbackLocked() {
+            // Caller holds sessionMutex.
             try {
                 activeCallback?.let { connectivityManager.unregisterNetworkCallback(it) }
             } catch (e: Exception) {
-                Timber.tag(TAG).d("safeUnregisterCallback: %s", e.javaClass.simpleName)
+                Timber.tag(TAG).d("safeUnregisterCallbackLocked: %s", e.javaClass.simpleName)
             } finally {
                 activeCallback = null
                 activeNetwork = null
@@ -522,14 +570,14 @@ class CameraWifiConnectorImpl
         /**
          * Returns the [Network] for the given handle.
          *
-         * Uses [activeNetwork] cached from [ConnectivityManager.NetworkCallback.onAvailable] so the
-         * result is deterministic and avoids an OEM-flaky [ConnectivityManager.allNetworks] scan.
-         * Falls back to the scan only when the cache is absent (e.g. after process restore).
+         * Reads [activeNetwork] under [sessionMutex] to prevent a torn read vs the
+         * NetworkCallback thread that writes it in [onAvailable] (M-19).
+         * Falls back to [ConnectivityManager.allNetworks] scan when the cache is absent.
          *
          * Returns null if no active network matches (e.g. network was lost between request and socket open).
          */
-        private fun findNetwork(handle: CameraNetworkHandle): Network? {
-            val cached = activeNetwork
+        private suspend fun findNetwork(handle: CameraNetworkHandle): Network? {
+            val cached = sessionMutex.withLock { activeNetwork }
             if (cached != null && cached.networkHandle.toString() == handle.value) return cached
             // Fallback: scan allNetworks if cache was cleared unexpectedly (e.g. process restore).
             val targetId = handle.value.toLongOrNull() ?: return null
