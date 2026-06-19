@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,7 +36,10 @@ class DiagnosticTimeline
         private val _live =
             MutableSharedFlow<DiagnosticEvent>(
                 replay = 0,
-                extraBufferCapacity = 64,
+                // M-11: raised from 64 to 256 to reduce the probability of drops during
+                // burst-emission scenarios (e.g. rapid transfer progress events). tryEmit
+                // below logs a warning when the buffer is still exhausted.
+                extraBufferCapacity = 256,
             )
 
         /** Hot, replay=0 broadcast of each newly appended event. */
@@ -52,9 +56,19 @@ class DiagnosticTimeline
          * [tryEmit] is used for [_live]: if no collector is present or the buffer is full
          * the event is dropped from the hot flow but still persisted in [_timeline].
          * This keeps [append] non-suspending and safe to call from any coroutine context.
+         *
+         * M-11: a dropped event is logged at WARN level (category only — no raw identifiers)
+         * so that buffer-exhaustion is observable in diagnostics without silently losing events.
          */
         fun append(event: DiagnosticEvent) {
             _timeline.update { current -> current + event }
-            _live.tryEmit(event)
+            if (!_live.tryEmit(event)) {
+                // Event persisted in _timeline but dropped from the live hot flow.
+                // No raw identifiers logged — category name only.
+                Timber.w(
+                    "DiagnosticTimeline: live-flow buffer full, event dropped from broadcast (category=%s)",
+                    event.category::class.simpleName,
+                )
+            }
         }
     }
