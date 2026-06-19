@@ -67,7 +67,10 @@ class FujiNativeSdkAdapter
             endpointMetadata: EndpointMetadata,
         ): Result<SessionId> =
             withContext(ioDispatcher) {
-                val metaJson = """{"host":"${endpointMetadata.host}","port":${endpointMetadata.port}}"""
+                val metaJson =
+                    buildEndpointJson(endpointMetadata).getOrElse { cause ->
+                        return@withContext Result.failure(cause)
+                    }
                 try {
                     nativeFujiSdk
                         .openWifiSession(socketFd, metaJson)
@@ -252,5 +255,47 @@ class FujiNativeSdkAdapter
         private fun closeDetachedFd(fd: Int) {
             if (fd < 0) return
             runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
+        }
+
+        companion object {
+            /**
+             * Matches a dotted-decimal IPv4 address: four 1-3 digit octets separated by dots.
+             * Each octet is 0–255 but we validate range only to the extent that digits and dots
+             * are the only characters — the Rust PTP-IP layer validates the actual address range.
+             * The pattern intentionally rejects anything containing quotes, backslashes, or
+             * whitespace, preventing JSON injection via [EndpointMetadata.host].
+             */
+            internal val IPV4_PATTERN = Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$""")
+
+            /**
+             * Builds the endpoint JSON passed to the Rust JNI bridge.
+             *
+             * The host field is validated against [IPV4_PATTERN] before interpolation,
+             * preventing JSON injection from a malformed or adversarial
+             * [EndpointMetadata.host] value.
+             *
+             * Port is typed as [Int] and therefore cannot contain control characters,
+             * quotes, or backslashes — no additional escaping is needed.
+             *
+             * PRIVACY: host is a LAN IP — it appears only in this JSON blob passed to
+             * Rust; it is never logged. See privacy-local-first.md.
+             *
+             * @return [Result.success] with the JSON string, or [Result.failure] with
+             *   [IllegalArgumentException] if [EndpointMetadata.host] is not a valid
+             *   IPv4 address.
+             */
+            internal fun buildEndpointJson(endpointMetadata: EndpointMetadata): Result<String> {
+                val host = endpointMetadata.host
+                if (!IPV4_PATTERN.matches(host)) {
+                    return Result.failure(
+                        IllegalArgumentException(
+                            "EndpointMetadata.host is not a valid IPv4 address (rejected before JNI call)",
+                        ),
+                    )
+                }
+                // host is now proven to contain only digits and dots — safe to interpolate.
+                val json = """{"host":"$host","port":${endpointMetadata.port}}"""
+                return Result.success(json)
+            }
         }
     }
