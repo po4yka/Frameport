@@ -53,7 +53,7 @@ class CameraProfileDaoTest {
 
     // cancel-safe: runTest uses StandardTestDispatcher; Room suspend DAOs are cancel-safe.
 
-    // ─── upsert ───────────────────────────────────────────────────────────────
+    // ─── upsert (internal — tested here as same package) ──────────────────────
 
     @Test
     fun upsert_insertsNewProfile_andGetBySerialHashReturnsIt() =
@@ -99,6 +99,106 @@ class CameraProfileDaoTest {
 
             // Assert
             assertEquals(2, all.size)
+        }
+
+    // ─── upsertBySerialHash — firstSeenEpochMs preservation ──────────────────
+
+    /**
+     * H-8 regression: [CameraProfileDao.upsertBySerialHash] MUST preserve firstSeenEpochMs
+     * when a row already exists for the given serial hash.
+     *
+     * Scenario: camera is seen for the first time (firstSeen = 1000), then seen again on a
+     * second session (firstSeen would be 9999 if supplied naively). The second
+     * upsertBySerialHash call must keep firstSeen = 1000.
+     */
+    @Test
+    fun upsertBySerialHash_preservesFirstSeenEpochMs_onSubsequentUpsert() =
+        runTest {
+            // Arrange: first session open — camera seen for the first time
+            val firstSeenMs = 1_000L
+            dao.upsertBySerialHash("hash-xt5") { existing ->
+                buildEntity(
+                    profileId = "p1",
+                    serialHash = "hash-xt5",
+                    firstSeenEpochMs = firstSeenMs,
+                    lastSeenEpochMs = firstSeenMs,
+                )
+            }
+
+            // Act: second session open — must not overwrite firstSeenEpochMs
+            val secondSeenMs = 9_999L
+            dao.upsertBySerialHash("hash-xt5") { existing ->
+                // Correct pattern: preserve firstSeenEpochMs from existing row
+                buildEntity(
+                    profileId = existing!!.profileId,
+                    serialHash = "hash-xt5",
+                    firstSeenEpochMs = existing.firstSeenEpochMs,
+                    lastSeenEpochMs = secondSeenMs,
+                )
+            }
+
+            // Assert
+            val result = dao.getBySerialHash("hash-xt5")
+            assertNotNull(result)
+            assertEquals(
+                "firstSeenEpochMs must be preserved from the original insert",
+                firstSeenMs,
+                result!!.firstSeenEpochMs,
+            )
+            assertEquals(
+                "lastSeenEpochMs must be updated to the second session time",
+                secondSeenMs,
+                result.lastSeenEpochMs,
+            )
+        }
+
+    /**
+     * Documents the REPLACE hazard: calling the internal [CameraProfileDao.upsert] directly
+     * with a new profileId but the same serial_hash as an existing row triggers the UNIQUE
+     * index conflict resolution strategy REPLACE. SQLite resolves the conflict by deleting the
+     * old row (including its firstSeenEpochMs) and inserting the new one. This is why [upsert]
+     * is documented as internal and [upsertBySerialHash] is the mandatory public write path.
+     *
+     * This test documents the known-bad behaviour rather than asserting it is fixed —
+     * it exists so reviewers understand exactly what REPLACE does to firstSeenEpochMs when
+     * called with a mismatched profileId.
+     */
+    @Test
+    fun upsert_rawReplace_withDifferentProfileId_destroysFirstSeenEpochMs_documentedBehaviour() =
+        runTest {
+            // Arrange: original row with firstSeenEpochMs = 1000
+            val originalFirstSeen = 1_000L
+            dao.upsert(
+                buildEntity(
+                    profileId = "original-id",
+                    serialHash = "hash-replace-hazard",
+                    firstSeenEpochMs = originalFirstSeen,
+                    lastSeenEpochMs = originalFirstSeen,
+                ),
+            )
+
+            // Act: raw upsert with a NEW profileId but the SAME serial_hash.
+            // REPLACE deletes the old row (losing firstSeenEpochMs = 1000) and inserts this one.
+            val replacedFirstSeen = 9_999L
+            dao.upsert(
+                buildEntity(
+                    profileId = "replacement-id", // different PK
+                    serialHash = "hash-replace-hazard", // same serial_hash → REPLACE fires
+                    firstSeenEpochMs = replacedFirstSeen, // original value LOST
+                    lastSeenEpochMs = replacedFirstSeen,
+                ),
+            )
+
+            // Assert: the row exists but firstSeenEpochMs is the replacement value, not original.
+            // This documents the data-loss bug that upsertBySerialHash prevents.
+            val result = dao.getBySerialHash("hash-replace-hazard")
+            assertNotNull(result)
+            assertEquals(
+                "REPLACE with different profileId LOSES the original firstSeenEpochMs — " +
+                    "this is the documented hazard that makes raw upsert() dangerous",
+                replacedFirstSeen,
+                result!!.firstSeenEpochMs,
+            )
         }
 
     // ─── observeAll ───────────────────────────────────────────────────────────

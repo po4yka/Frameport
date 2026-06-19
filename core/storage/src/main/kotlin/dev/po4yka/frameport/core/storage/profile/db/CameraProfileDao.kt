@@ -10,18 +10,13 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface CameraProfileDao {
     /**
-     * Insert or replace a [CameraProfileEntity].
+     * Insert or replace a [CameraProfileEntity] by primary key (profile_id).
      *
-     * Uses REPLACE on the primary-key conflict (profile_id). The caller is responsible for
-     * ensuring the correct profileId is set when updating an existing row (copy the existing
-     * entity and mutate only mutable fields). A naive insert with a new profileId and a
-     * duplicate serial_hash would trigger the UNIQUE constraint and silently delete the
-     * old row via REPLACE — destroying [firstSeenEpochMs].
-     *
-     * To guarantee read-modify-write atomicity, callers that perform a getBySerialHash
-     * followed by this upsert MUST annotate their orchestrating function with @Transaction
-     * (or call both DAO methods from within a @Transaction-annotated wrapper function).
-     * [CameraProfileRepositoryImpl.upsertOnSessionOpen] is annotated accordingly.
+     * INTERNAL — use [upsertBySerialHash] for all callers outside this package.
+     * Direct use of this method is unsafe: a caller that supplies a fresh profileId with a
+     * serial_hash that already exists in the table triggers the UNIQUE constraint on
+     * serial_hash, which REPLACE resolves by deleting the old row and inserting the new one.
+     * That silently destroys [CameraProfileEntity.firstSeenEpochMs] on the old row.
      *
      * cancel-safe: Room suspend DAO calls use a dedicated coroutine context; cancellation
      * suspends cleanly.
@@ -41,10 +36,11 @@ interface CameraProfileDao {
     /**
      * Atomic read-then-upsert of a camera profile identified by [serialHash].
      *
-     * Runs the getBySerialHash + upsert pair inside a single SQLite transaction so that
-     * concurrent callers cannot both read null and independently insert duplicate rows with
-     * different profileIds (which would trigger the UNIQUE constraint on serial_hash, causing
-     * REPLACE to delete the older row and silently destroy its firstSeenEpochMs).
+     * This is the only public write path. Runs the getBySerialHash + upsert pair inside a
+     * single SQLite transaction so that concurrent callers cannot both read null and
+     * independently insert duplicate rows with different profileIds (which would trigger the
+     * UNIQUE constraint on serial_hash, causing REPLACE to delete the older row and silently
+     * destroy its firstSeenEpochMs).
      *
      * [buildEntity] receives the existing [CameraProfileEntity] (or null) and must return
      * the entity to persist. The caller is responsible for preserving profileId and
