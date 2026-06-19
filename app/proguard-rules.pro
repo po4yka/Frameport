@@ -29,9 +29,11 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 
-# Keep all @Serializable annotated classes (covers nav keys + ImportPreferences)
--keep @kotlinx.serialization.Serializable class * { *; }
--keepclassmembers @kotlinx.serialization.Serializable class * {
+# Keep @Serializable annotated classes scoped to this app (covers nav keys + ImportPreferences).
+# Narrowed from 'class *' to 'dev.po4yka.frameport.**' to avoid retaining third-party
+# @Serializable classes that ship their own consumer rules.
+-keep @kotlinx.serialization.Serializable class dev.po4yka.frameport.** { *; }
+-keepclassmembers @kotlinx.serialization.Serializable class dev.po4yka.frameport.** {
     *** Companion;
     *** INSTANCE;
     kotlinx.serialization.KSerializer serializer(...);

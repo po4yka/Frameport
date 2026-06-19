@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network security config for Frameport.
+
+    Default: cleartext traffic is denied for all destinations. Frameport is a local-first
+    app with no outbound connections to Frameport-operated servers. The only connections
+    are to the user's own Fujifilm camera over PTP-IP (Wi-Fi) and BLE; both transports
+    use raw sockets that are not subject to this config (PTP-IP speaks its own framing
+    over TCP, not HTTP/HTTPS). This config is therefore pure defense-in-depth: it prevents
+    any accidental cleartext HTTP from reaching the internet.
+
+    If a specific local-subnet cleartext exception is ever required for camera discovery
+    (e.g. mDNS / SSDP over HTTP), add a narrow <domain includeSubdomains="false"> entry
+    scoped to 192.168.0.0/24 or the camera's advertised hostname with a comment explaining
+    the rationale. Do NOT add a blanket cleartext permission.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
