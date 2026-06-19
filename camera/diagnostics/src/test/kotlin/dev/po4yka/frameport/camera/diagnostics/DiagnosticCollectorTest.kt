@@ -87,4 +87,31 @@ class DiagnosticCollectorTest {
             assertEquals("0x2001", event.metadata["responseCode"])
             assertEquals("session-42", event.sessionId)
         }
+
+    // H-5: metadata keys are redacted, not only values
+    @Test
+    fun recordEvent_redactsMetadataKeysContainingMacAddress() =
+        runTest {
+            // A raw MAC used as a metadata key must not appear in the stored event.
+            repository.recordEvent(
+                diagnosticEvent(
+                    layer = ErrorLayer.Bluetooth,
+                    category = DiagnosticCategory.BluetoothEvent,
+                    message = "device connected",
+                    metadata = mapOf("AA:BB:CC:DD:EE:FF" to "connected"),
+                    sessionId = "session-ble-01",
+                ),
+            )
+
+            val event = timeline.timeline.value.single()
+            val allKeys = event.metadata.keys.joinToString(" ")
+            assertFalse(
+                "Raw MAC must not appear as a metadata key after redaction",
+                allKeys.contains("AA:BB:CC:DD:EE:FF"),
+            )
+            assertTrue(
+                "Redacted MAC sentinel must appear in the key",
+                allKeys.contains("<redacted-mac>"),
+            )
+        }
 }

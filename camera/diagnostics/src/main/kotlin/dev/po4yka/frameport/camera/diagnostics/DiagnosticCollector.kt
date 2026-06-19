@@ -53,7 +53,7 @@ class DiagnosticCollector
          *
          * @param layer The architectural layer where the error originated.
          * @param cause Typed error; [FrameportError.message] becomes the event message.
-         * @param context Key→value metadata. Values are redacted before storage.
+         * @param context Key→value metadata. Both keys and values are redacted before storage.
          */
         fun recordError(
             layer: ErrorLayer,
@@ -76,7 +76,13 @@ class DiagnosticCollector
         private fun DiagnosticEvent.redacted(): DiagnosticEvent =
             copy(
                 message = redactionPipeline.redactDiagnosticText(message),
-                metadata = metadata.mapValues { (_, value) -> redactionPipeline.redactDiagnosticText(value) },
+                // Redact both keys and values: a raw MAC/serial/SSID used as a metadata
+                // key is equally sensitive to one used as a value.
+                metadata =
+                    metadata.entries.associate { (key, value) ->
+                        redactionPipeline.redactDiagnosticText(key) to
+                            redactionPipeline.redactDiagnosticText(value)
+                    },
                 sessionId = redactionPipeline.redactDiagnosticText(sessionId),
             )
     }
