@@ -46,11 +46,21 @@ pub struct FujiFrame {
 /// (value = `4 + body.len()`) followed by `body`.
 ///
 /// # Panics
-/// Does not panic. Returns an empty-body frame (length = 4) when `body` is empty.
+/// Panics in debug builds if `4 + body.len()` exceeds `u32::MAX` (a frame
+/// larger than ~4 GiB is a programming error; the Fuji protocol does not
+/// support frames this large). In release builds the length field saturates
+/// to `u32::MAX`, which the camera will reject — the caller is responsible
+/// for not constructing oversized frames.
 pub fn encode_fuji_frame(body: &[u8]) -> Vec<u8> {
     let total = 4_usize + body.len();
+    // Fuji frames use a u32 LE length field; frames >4 GiB are not valid.
+    debug_assert!(
+        total <= u32::MAX as usize,
+        "encode_fuji_frame: frame length {total} overflows u32"
+    );
+    let total_u32 = u32::try_from(total).unwrap_or(u32::MAX);
     let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&total_u32.to_le_bytes());
     out.extend_from_slice(body);
     out
 }

@@ -250,7 +250,7 @@ fn decode_camera_name(buf: &[u8], offset: usize) -> Result<String, PtpCodecError
 /// Encode the camera name into exactly 44 bytes of null-padded UTF-16LE.
 fn encode_camera_name(s: &str) -> [u8; CAMERA_NAME_FIELD_BYTES] {
     let mut out = [0u8; CAMERA_NAME_FIELD_BYTES];
-    // 22 visible chars × 2 bytes = 44 bytes; last 2 bytes remain null.
+    // 21 visible chars × 2 bytes = 42 bytes; last 2 bytes remain null (null terminator).
     let units: Vec<u16> = s.encode_utf16().take(21).collect();
     for (i, unit) in units.iter().enumerate() {
         let le = unit.to_le_bytes();
@@ -494,7 +494,8 @@ pub fn decode_packet(buf: &[u8]) -> Result<PtpIpPacket, PtpCodecError> {
             let response_code = read_u16_le(pkt, 8)?;
             let transaction_id = read_u32_le(pkt, 10)?;
             let remaining = pkt.len() - fixed_min;
-            let param_count = remaining / 4;
+            // PTP specifies a maximum of 5 response parameters (section 4.6).
+            let param_count = (remaining / 4).min(5);
             let result_params = read_u32_array(pkt, fixed_min, param_count)?;
             Ok(PtpIpPacket::OperationResponse {
                 response_code,
@@ -516,7 +517,8 @@ pub fn decode_packet(buf: &[u8]) -> Result<PtpIpPacket, PtpCodecError> {
             let event_code = read_u16_le(pkt, 8)?;
             let transaction_id = read_u32_le(pkt, 10)?;
             let remaining = pkt.len() - fixed_min;
-            let param_count = remaining / 4;
+            // PTP specifies a maximum of 5 event parameters (mirrors OperationRequest cap).
+            let param_count = (remaining / 4).min(5);
             let params = read_u32_array(pkt, fixed_min, param_count)?;
             Ok(PtpIpPacket::Event {
                 event_code,
@@ -655,8 +657,13 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
 
         // ── Init Fail — header + raw payload ──────────────────────────────
         PtpIpPacket::InitFail { raw_payload } => {
-            let total = (HEADER_SIZE + raw_payload.len()) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = HEADER_SIZE + raw_payload.len();
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "InitFail encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::InitFail, total);
             out.extend_from_slice(raw_payload);
             out
@@ -669,10 +676,15 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
             transaction_id,
             params,
         } => {
-            // 8 + 4 + 2 + 4 + 4*n
+            // 8 + 4 + 2 + 4 + 4*n; PTP caps at 5 parameters.
             let param_count = params.len().min(5);
-            let total = (18 + param_count * 4) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = 18 + param_count * 4;
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "OperationRequest encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::OperationRequest, total);
             out.extend_from_slice(&data_phase.to_le_bytes());
             out.extend_from_slice(&opcode.to_le_bytes());
@@ -689,13 +701,19 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
             transaction_id,
             result_params,
         } => {
-            // 8 + 2 + 4 + 4*n = 14 + 4*n
-            let total = (14 + result_params.len() * 4) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            // 8 + 2 + 4 + 4*n = 14 + 4*n; PTP caps at 5 result parameters.
+            let param_count = result_params.len().min(5);
+            let byte_len = 14 + param_count * 4;
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "OperationResponse encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::OperationResponse, total);
             out.extend_from_slice(&response_code.to_le_bytes());
             out.extend_from_slice(&transaction_id.to_le_bytes());
-            for p in result_params {
+            for p in result_params.iter().take(5) {
                 out.extend_from_slice(&p.to_le_bytes());
             }
             out
@@ -707,12 +725,19 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
             transaction_id,
             params,
         } => {
-            let total = (14 + params.len() * 4) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            // PTP caps event parameters at 5 (mirrors OperationRequest/OperationResponse).
+            let param_count = params.len().min(5);
+            let byte_len = 14 + param_count * 4;
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "Event encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::Event, total);
             out.extend_from_slice(&event_code.to_le_bytes());
             out.extend_from_slice(&transaction_id.to_le_bytes());
-            for p in params {
+            for p in params.iter().take(5) {
                 out.extend_from_slice(&p.to_le_bytes());
             }
             out
@@ -736,8 +761,13 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
             transaction_id,
             payload,
         } => {
-            let total = (12 + payload.len()) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = 12 + payload.len();
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "DataPacket encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::DataPacket, total);
             out.extend_from_slice(&transaction_id.to_le_bytes());
             out.extend_from_slice(payload);
@@ -746,8 +776,13 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
 
         // ── Cancel Transaction ─────────────────────────────────────────────
         PtpIpPacket::CancelTransaction { raw_payload } => {
-            let total = (HEADER_SIZE + raw_payload.len()) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = HEADER_SIZE + raw_payload.len();
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "CancelTransaction encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::CancelTransaction, total);
             out.extend_from_slice(raw_payload);
             out
@@ -758,8 +793,13 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
             transaction_id,
             payload,
         } => {
-            let total = (12 + payload.len()) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = 12 + payload.len();
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "EndData encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::DataPacketEnd, total);
             out.extend_from_slice(&transaction_id.to_le_bytes());
             out.extend_from_slice(payload);
@@ -768,8 +808,13 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
 
         // ── Ping ───────────────────────────────────────────────────────────
         PtpIpPacket::Ping { raw_payload } => {
-            let total = (HEADER_SIZE + raw_payload.len()) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = HEADER_SIZE + raw_payload.len();
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "Ping encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::Ping, total);
             out.extend_from_slice(raw_payload);
             out
@@ -777,8 +822,13 @@ pub fn encode_packet(packet: &PtpIpPacket) -> Vec<u8> {
 
         // ── Pong ───────────────────────────────────────────────────────────
         PtpIpPacket::Pong { raw_payload } => {
-            let total = (HEADER_SIZE + raw_payload.len()) as u32;
-            let mut out = Vec::with_capacity(total as usize);
+            let byte_len = HEADER_SIZE + raw_payload.len();
+            debug_assert!(
+                byte_len <= u32::MAX as usize,
+                "Pong encode: packet length {byte_len} overflows u32"
+            );
+            let total = u32::try_from(byte_len).unwrap_or(u32::MAX);
+            let mut out = Vec::with_capacity(byte_len);
             encode_header_into(&mut out, PtpIpPacketType::Pong, total);
             out.extend_from_slice(raw_payload);
             out
@@ -1019,6 +1069,27 @@ mod tests {
         assert_eq!(decoded, pkt);
     }
 
+    #[test]
+    fn operation_response_six_params_capped_to_five_on_encode_and_decode() {
+        // Supply 6 params — encode must silently cap to 5 (PTP wire limit).
+        let pkt = PtpIpPacket::OperationResponse {
+            response_code: 0x2001,
+            transaction_id: 42,
+            result_params: vec![1, 2, 3, 4, 5, 6],
+        };
+        let encoded = encode_packet(&pkt);
+        // Wire size: 14 fixed + 5 * 4 = 34 bytes (not 38).
+        assert_eq!(encoded.len(), 34, "encode must cap at 5 params");
+        let decoded = decode_packet(&encoded).unwrap();
+        match decoded {
+            PtpIpPacket::OperationResponse { result_params, .. } => {
+                assert_eq!(result_params.len(), 5, "decode must read at most 5 params");
+                assert_eq!(result_params, vec![1, 2, 3, 4, 5]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
     // ── Event ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -1044,6 +1115,27 @@ mod tests {
         let encoded = encode_packet(&pkt);
         let decoded = decode_packet(&encoded).unwrap();
         assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn event_six_params_capped_to_five_on_encode_and_decode() {
+        // Supply 6 params — encode must silently cap to 5 (PTP wire limit).
+        let pkt = PtpIpPacket::Event {
+            event_code: 0x4003,
+            transaction_id: 10,
+            params: vec![10, 20, 30, 40, 50, 60],
+        };
+        let encoded = encode_packet(&pkt);
+        // Wire size: 14 fixed + 5 * 4 = 34 bytes (not 38).
+        assert_eq!(encoded.len(), 34, "encode must cap at 5 params");
+        let decoded = decode_packet(&encoded).unwrap();
+        match decoded {
+            PtpIpPacket::Event { params, .. } => {
+                assert_eq!(params.len(), 5, "decode must read at most 5 params");
+                assert_eq!(params, vec![10, 20, 30, 40, 50]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     // ── StartData / EndData ────────────────────────────────────────────────

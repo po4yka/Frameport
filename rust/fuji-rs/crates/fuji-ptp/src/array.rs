@@ -62,8 +62,14 @@ pub fn decode_u32_array(buf: &[u8], offset: usize) -> Result<(Vec<u32>, usize), 
 /// Encodes a `u32` slice as a PTP array (u32 count + elements).
 ///
 /// Returns the encoded bytes.
+///
+/// # Panics
+/// Panics if `elements.len()` exceeds `u32::MAX` (4 294 967 295 elements).
+/// In practice PTP arrays are orders of magnitude smaller, so this is a
+/// programming error rather than a recoverable condition.
 pub fn encode_u32_array(elements: &[u32]) -> Vec<u8> {
-    let count = elements.len() as u32;
+    let count = u32::try_from(elements.len())
+        .expect("PTP array element count exceeds u32::MAX");
     let mut out = Vec::with_capacity(4 + elements.len() * 4);
     out.extend_from_slice(&count.to_le_bytes());
     for elem in elements {

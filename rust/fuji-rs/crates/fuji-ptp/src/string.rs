@@ -153,9 +153,18 @@ pub fn encode_device_name(s: &str) -> [u8; DEVICE_NAME_FIELD_BYTES] {
 
 /// Reads `buf` as a sequence of little-endian `u16` code units.
 ///
-/// Requires `buf.len()` to be even; if odd the last byte is ignored (this should
-/// not happen on well-formed PTP packets).
-fn decode_utf16le_units(buf: &[u8]) -> Result<Vec<u16>, PtpCodecError> {
+/// Requires `buf.len()` to be even. Returns [`PtpCodecError::PacketTooShort`]
+/// when the buffer has an odd number of bytes, which indicates a truncated or
+/// malformed PTP packet.
+pub(crate) fn decode_utf16le_units(buf: &[u8]) -> Result<Vec<u16>, PtpCodecError> {
+    if !buf.len().is_multiple_of(2) {
+        // An odd-length buffer means a UTF-16LE code unit was split across a
+        // packet boundary; treat it as a truncation error.
+        return Err(PtpCodecError::PacketTooShort {
+            expected: buf.len() + 1,
+            got: buf.len(),
+        });
+    }
     let pair_count = buf.len() / 2;
     let mut units = Vec::with_capacity(pair_count);
     for i in 0..pair_count {
@@ -223,5 +232,47 @@ mod tests {
         assert_eq!(encoded[3], 0x00);
         // Rest should be zero.
         assert!(encoded[4..].iter().all(|&b| b == 0));
+    }
+
+    // ── decode_utf16le_units odd-length guard (finding string.rs:158) ──────
+
+    #[test]
+    fn decode_utf16le_units_odd_length_returns_error() {
+        // A 3-byte buffer has an odd length — the last UTF-16LE code unit is
+        // split; the function must reject this instead of silently dropping the
+        // trailing byte.
+        let odd_buf = [0x41u8, 0x00, 0x42]; // 'A' complete, 'B' truncated
+        assert!(matches!(
+            decode_utf16le_units(&odd_buf),
+            Err(PtpCodecError::PacketTooShort {
+                expected: 4,
+                got: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_utf16le_units_single_odd_byte_returns_error() {
+        assert!(matches!(
+            decode_utf16le_units(&[0xFF]),
+            Err(PtpCodecError::PacketTooShort {
+                expected: 2,
+                got: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_utf16le_units_even_length_succeeds() {
+        // 'A' (0x0041) followed by 'B' (0x0042) in UTF-16LE
+        let buf = [0x41u8, 0x00, 0x42, 0x00];
+        let units = decode_utf16le_units(&buf).unwrap();
+        assert_eq!(units, vec![0x0041u16, 0x0042u16]);
+    }
+
+    #[test]
+    fn decode_utf16le_units_empty_succeeds() {
+        let units = decode_utf16le_units(&[]).unwrap();
+        assert_eq!(units, Vec::<u16>::new());
     }
 }
