@@ -38,10 +38,16 @@ ksp {
 
 dependencies {
     implementation(projects.core.model)
-    implementation(libs.androidx.datastore)
+    // androidx.datastore removed: no DataStore usage exists in this module (verified by grep).
+    // If Proto DataStore is added for settings persistence, re-add libs.androidx.datastore here.
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.hilt.android)
+    // Jetpack Security (EncryptedSharedPreferences backed by Android Keystore) for
+    // EncryptedCredentialStore. Note: androidx.security:security-crypto is in maintenance mode
+    // as of 2024; a migration to Tink or Jetpack Datastore with manual AES-GCM encryption
+    // via KeyStore may follow in a future milestone.
+    implementation(libs.androidx.security.crypto)
     ksp(libs.androidx.room.compiler)
     ksp(libs.androidx.hilt.compiler)
 

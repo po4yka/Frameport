@@ -13,6 +13,8 @@ import dev.po4yka.frameport.core.storage.catalog.RoomImportCatalog
 import dev.po4yka.frameport.core.storage.catalog.db.FrameportDatabase
 import dev.po4yka.frameport.core.storage.catalog.db.FrameportMigrations
 import dev.po4yka.frameport.core.storage.catalog.db.ImportCatalogDao
+import dev.po4yka.frameport.core.storage.credentials.EncryptedCredentialStore
+import dev.po4yka.frameport.core.storage.credentials.EncryptedSharedPreferencesCredentialStore
 import dev.po4yka.frameport.core.storage.profile.db.CameraProfileDao
 import dev.po4yka.frameport.core.storage.session.ExitReasonDedupStore
 import dev.po4yka.frameport.core.storage.session.RoomExitReasonDedupStore
@@ -54,6 +56,16 @@ abstract class StorageModule {
     @Binds
     @Singleton
     abstract fun bindLocalTimelineStore(impl: RoomLocalTimelineStore): LocalTimelineStore
+
+    /**
+     * Binds the Android Keystore-backed credential store.
+     * No plaintext Room or DataStore path exists for Wi-Fi credentials (CLAUDE.md mandate).
+     */
+    @Binds
+    @Singleton
+    abstract fun bindEncryptedCredentialStore(
+        impl: EncryptedSharedPreferencesCredentialStore,
+    ): EncryptedCredentialStore
 
     companion object {
         @Provides
