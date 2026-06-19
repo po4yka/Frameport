@@ -46,7 +46,7 @@ Compose BOM 2026.05.01                    Navigation3 1.1.2
 Hilt 2.59.2          Room 2.8.4           DataStore 1.2.0
 Coroutines 1.10.2    Coil 2.7.0           Timber 5.0.1
 JDK target 17        applicationId/namespace: dev.po4yka.frameport
-Rust edition 2024    resolver 3           jni 0.21   thiserror 2
+Rust edition 2024    resolver 3           jni 0.22.4 thiserror 2
 ```
 
 ## Build & Verify

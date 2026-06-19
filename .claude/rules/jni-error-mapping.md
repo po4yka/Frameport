@@ -113,14 +113,14 @@ Verify against the active `[profile.android-jni]` block before enabling size-opt
 - **`#[no_mangle]` instead of `#[unsafe(no_mangle)]`** — Rust edition 2024 requires the `unsafe(...)` form.
 - **Dot-separated class names in Rust** — `FindClass` silently returns null; always use slash-separated paths (e.g. `dev/po4yka/frameport/nativebridge/error/NativeException`).
 - **Continuing after throw_new** — undefined JVM behavior; return the sentinel immediately.
-- **`mut env` for `throw_new`** — jni 0.21 `JNIEnv::throw_new` takes `&self`; no mutable borrow needed.
+- **`mut env` for `throw_new`** — jni 0.22 `JNIEnv::throw_new` takes `&self`; no mutable borrow needed.
 - **Not clearing a pending exception** before calling `throw_new` — the second throw is silently ignored; call `env.exception_clear()` first.
 
 ## References
 
 - `std::panic::catch_unwind` — https://doc.rust-lang.org/std/panic/fn.catch_unwind.html
 - FFI and Unwinding, The Rustonomicon — https://doc.rust-lang.org/nomicon/ffi.html
-- jni 0.21.x `JNIEnv::throw_new`, `exception_check`, `exception_clear` — https://docs.rs/jni/0.21.1/jni/struct.JNIEnv.html
+- jni 0.22.x `JNIEnv::throw_new`, `exception_check`, `exception_clear` — https://docs.rs/jni/0.22.4/jni/struct.JNIEnv.html
 - jni::errors (Exception struct, Error enum) — https://docs.rs/jni/latest/jni/errors/
 - JNI Tips — Exception Handling (Android NDK) — https://developer.android.com/training/articles/perf-jni
 - Frameport local: `docs/rust/error-handling.md`, `docs/rust/ffi-boundary.md`
