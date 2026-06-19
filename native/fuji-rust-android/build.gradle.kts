@@ -4,10 +4,16 @@ plugins {
 
 android {
     namespace = "dev.po4yka.frameport.nativebridge"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    compileSdk =
+        libs.versions.compileSdk
+            .get()
+            .toInt()
 
     defaultConfig {
-        minSdk = libs.versions.minSdk.get().toInt()
+        minSdk =
+            libs.versions.minSdk
+                .get()
+                .toInt()
     }
 
     compileOptions {
@@ -28,11 +34,12 @@ tasks.register<Exec>("cargoTestRust") {
     description = "Runs Rust unit tests for the Frameport Fuji SDK workspace."
     group = "verification"
     workingDir = rustWorkspaceDir.asFile
-    commandLine("cargo", "test", "--workspace")
+    commandLine("cargo", "test", "--workspace", "--locked")
 }
 
 tasks.register<Exec>("cargoBuildRustArm64") {
-    description = "Builds the Rust JNI library for Android arm64-v8a with cargo-ndk. This task is explicit and is not wired into assemble."
+    description =
+        "Builds the Rust JNI library for Android arm64-v8a with cargo-ndk. This task is explicit and is not wired into assemble."
     group = "build"
     workingDir = rustWorkspaceDir.asFile
     commandLine(
@@ -41,15 +48,19 @@ tasks.register<Exec>("cargoBuildRustArm64") {
         "-t",
         "arm64-v8a",
         "-o",
-        layout.projectDirectory.dir("src/main/jniLibs").asFile.absolutePath,
+        layout.projectDirectory
+            .dir("src/main/jniLibs")
+            .asFile.absolutePath,
         "build",
         "-p",
         "fuji-ffi",
+        "--locked",
     )
 }
 
 tasks.register<Exec>("cargoBuildRustX86_64") {
-    description = "Builds the Rust JNI library for Android x86_64 with cargo-ndk for emulator debugging. This task is explicit and is not wired into assemble."
+    description =
+        "Builds the Rust JNI library for Android x86_64 with cargo-ndk for emulator debugging. This task is explicit and is not wired into assemble."
     group = "build"
     workingDir = rustWorkspaceDir.asFile
     commandLine(
@@ -58,10 +69,13 @@ tasks.register<Exec>("cargoBuildRustX86_64") {
         "-t",
         "x86_64",
         "-o",
-        layout.projectDirectory.dir("src/main/jniLibs").asFile.absolutePath,
+        layout.projectDirectory
+            .dir("src/main/jniLibs")
+            .asFile.absolutePath,
         "build",
         "-p",
         "fuji-ffi",
+        "--locked",
     )
 }
 
