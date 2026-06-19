@@ -9,6 +9,7 @@ import dev.po4yka.frameport.camera.api.FujiBleClient
 import dev.po4yka.frameport.core.common.di.IoDispatcher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import java.nio.ByteBuffer
@@ -142,7 +143,7 @@ class BleAssistedConnectUseCase
 
                 // Step 1 — Scan for the first available camera advertisement.
                 val advertisement =
-                    fujiBleClient.scan().firstOrError()
+                    fujiBleClient.scan().firstOrNull()
                         ?: run {
                             emit(BleHandoffState.Failed("No camera advertisement received during BLE scan."))
                             return@flow
@@ -229,31 +230,6 @@ class BleAssistedConnectUseCase
                 emit(BleHandoffState.Connected(ssid = handoff.ssid))
             }.flowOn(ioDispatcher)
     }
-
-/**
- * Collects the first element of this [Flow] without suspending indefinitely.
- *
- * Returns null if the flow completes without emitting.
- *
- * cancel-safe: uses [kotlinx.coroutines.flow.firstOrNull] semantics; the upstream
- * flow is cancelled immediately after the first element is collected.
- */
-// cancel-safe: collects at most one element then stops the upstream via a sentinel; cancellation of the caller propagates through collect() with no retained state.
-private suspend fun <T> Flow<T>.firstOrError(): T? {
-    var result: T? = null
-    try {
-        collect { item ->
-            result = item
-            throw StopCollectionSignal
-        }
-    } catch (_: StopCollectionSignal) {
-        // Normal early-exit; result is populated.
-    }
-    return result
-}
-
-/** Internal sentinel exception used to stop Flow collection after the first element. */
-private object StopCollectionSignal : Throwable()
 
 /**
  * Decodes this [ByteArray] to a UTF-8 [String], returning null on decoding failure.
