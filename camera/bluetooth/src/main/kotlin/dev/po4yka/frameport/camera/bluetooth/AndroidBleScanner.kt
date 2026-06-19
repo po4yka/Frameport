@@ -37,7 +37,9 @@ internal class AndroidBleScanner
                 .map { advertisement ->
                     val id = advertisementCache.remember(advertisement)
                     val displayName = advertisement.name ?: advertisement.peripheralName
-                    Timber.d("BLE: scan result displayName=$displayName rssi=${advertisement.rssi}")
+                    // Privacy: displayName may contain a device name that identifies the user's
+                    // camera — never log it. Log only the signal strength as a diagnostic proxy.
+                    Timber.d("BLE: scan result rssi=${advertisement.rssi}")
                     BleCameraAdvertisement(
                         camera =
                             BleCameraRef(
@@ -46,6 +48,5 @@ internal class AndroidBleScanner
                             ),
                         signalStrengthDbm = advertisement.rssi,
                     )
-                }
-                .catch { e -> throw e.asBleScanFailure() }
+                }.catch { e -> throw e.asBleScanFailure() }
     }
