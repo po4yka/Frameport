@@ -262,17 +262,3 @@ class ConnectionViewModel
                 }
             }
     }
-
-// ─── Legacy action type kept for backward compatibility with existing test ─────
-
-// The original placeholder test used CameraRepository directly and ConnectionAction.
-// New tests use the proper ConnectionViewModel API above.
-// These are kept to avoid breaking the old test file until it is fully replaced.
-
-sealed interface ConnectionAction {
-    data object StartScan : ConnectionAction
-
-    data object ConnectManually : ConnectionAction
-
-    data object Cancel : ConnectionAction
-}
