@@ -650,7 +650,6 @@ impl CommandTransport for UsbPtpSession {
             // Payload exhausted — read trailing OperationResponse.
             let txn_id = state.txn_id;
             self.object_stream = None;
-            let _ = txn_id;
 
             let resp = self.read_packet()?;
             self.expect_ok_response(resp, txn_id)?;
